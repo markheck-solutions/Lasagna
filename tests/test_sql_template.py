@@ -22,6 +22,7 @@ def test_render_service_values_requires_at_least_one_id() -> None:
 def test_rendered_sql_uses_explicit_values_not_pm_seed() -> None:
     sql = render_explicit_service_route_sql(["IC-123456", "ICB-654321"])
 
+    assert "USE SCHEMA prod_access_db.inca_src;" in sql
     assert "('IC-123456')" in sql
     assert "('ICB-654321')" in sql
     assert "LASAGNA_SERVICE_VALUES" not in sql

@@ -4,7 +4,7 @@ param(
     [string]$IdsFile,
     [string]$IdsText,
     [string]$OutputDir,
-    [string]$Connection = "sdm_runner",
+    [string]$Connection,
     [int]$MaxServiceTabs = 100,
     [switch]$KeepCombinedCsv
 )
@@ -18,7 +18,10 @@ if (-not (Test-Path -LiteralPath $SourcePath)) {
 }
 
 $env:PYTHONPATH = $SourcePath
-$argsList = @("-m", "lasagna.live_batch", "--connection", $Connection, "--max-service-tabs", [string]$MaxServiceTabs)
+$argsList = @("-m", "lasagna.live_batch", "--max-service-tabs", [string]$MaxServiceTabs)
+if (-not [string]::IsNullOrWhiteSpace($Connection)) {
+    $argsList += @("--connection", $Connection)
+}
 foreach ($id in $ServiceId) {
     $argsList += @("--service-id", $id)
 }

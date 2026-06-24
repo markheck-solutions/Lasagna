@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import tomllib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from lasagna.domain.service_ids import parse_service_id_text, unique_valid_service_ids
 from lasagna.snowflake.sql_template import render_explicit_service_route_sql
+
+FALLBACK_CONNECTION_NAME = "sdm_runner"
+CONNECTION_ENV_VAR = "LASAGNA_SNOWFLAKE_CONNECTION"
 
 
 def _import_snowflake_connector() -> Any:
@@ -18,11 +23,40 @@ def _import_snowflake_connector() -> Any:
     return snowflake.connector
 
 
-def connect_with_connection_name(connection: str) -> Any:
+def _connector_connections_file() -> Path | None:
+    try:
+        from snowflake.connector.constants import CONNECTIONS_FILE
+    except Exception:
+        return None
+    return Path(CONNECTIONS_FILE)
+
+
+def _single_connection_toml_profile(connections_file: Path | None = None) -> str | None:
+    path = connections_file or _connector_connections_file()
+    if path is None or not path.exists():
+        return None
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    profiles = [name for name, value in data.items() if isinstance(value, dict)]
+    if len(profiles) == 1:
+        return profiles[0]
+    return None
+
+
+def resolve_connection_name(connection: str | None = None) -> str:
+    """Resolve Snowflake connector profile without storing machine config in repo."""
+    if connection and connection.strip():
+        return connection.strip()
+    env_connection = os.environ.get(CONNECTION_ENV_VAR, "").strip()
+    if env_connection:
+        return env_connection
+    return _single_connection_toml_profile() or FALLBACK_CONNECTION_NAME
+
+
+def connect_with_connection_name(connection: str | None = None) -> Any:
     """Connect through a named Snowflake connector profile."""
     connector = _import_snowflake_connector()
     return connector.connect(
-        connection_name=connection,
+        connection_name=resolve_connection_name(connection),
         authenticator="externalbrowser",
         client_store_temporary_credential=True,
         session_parameters={"CLIENT_TELEMETRY_ENABLED": False},
@@ -79,7 +113,7 @@ def export_service_ids_to_combined_csv(
     service_ids: list[str],
     output_path: Path,
     *,
-    connection: str = "sdm_runner",
+    connection: str | None = None,
     generated_sql_path: Path | None = None,
 ) -> int:
     """Run Snowflake export for explicit service IDs and write combined CSV."""
@@ -99,7 +133,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Lasagna route rows from Snowflake.")
     parser.add_argument("--service-id", action="append", default=[])
     parser.add_argument("--ids-text", default="")
-    parser.add_argument("--connection", default="sdm_runner")
+    parser.add_argument("--connection")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--generated-sql", type=Path)
     return parser.parse_args(argv)

@@ -4,6 +4,8 @@
 -- Source commit: d5871b1e17c8772ae7836b158b1a1ddd9e4566fd
 -- No PM assigned-order seed, workpack, geo, Salesforce queue, or UI lanes.
 ----------------------------------------------------------------------
+USE SCHEMA prod_access_db.inca_src;
+
 CREATE OR REPLACE TEMP TABLE prod_service_seed_rows AS
 SELECT UPPER(column1::VARCHAR) AS service_id, 'manual_input' AS source_type
 FROM VALUES

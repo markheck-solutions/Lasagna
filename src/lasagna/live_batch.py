@@ -27,7 +27,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--service-id", action="append", default=[])
     parser.add_argument("--ids-text", default="")
     parser.add_argument("--ids-file", type=Path)
-    parser.add_argument("--connection", default="sdm_runner")
+    parser.add_argument("--connection")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-service-tabs", type=int, default=100)
     parser.add_argument("--keep-combined-csv", action="store_true")
@@ -66,6 +66,27 @@ def run_live_batch(args: argparse.Namespace) -> Path:
             except OSError:
                 pass
     return output_dir
+
+
+def run_live_batch_from_text(
+    ids_text: str,
+    *,
+    output_dir: Path | None = None,
+    connection: str | None = None,
+    max_service_tabs: int = 100,
+    keep_combined_csv: bool = False,
+) -> Path:
+    """Run live batch from pasted IDs without exposing argparse to callers."""
+    args = argparse.Namespace(
+        service_id=[],
+        ids_text=ids_text,
+        ids_file=None,
+        connection=connection,
+        output_dir=output_dir,
+        max_service_tabs=max_service_tabs,
+        keep_combined_csv=keep_combined_csv,
+    )
+    return run_live_batch(args)
 
 
 def main(argv: list[str] | None = None) -> int:
