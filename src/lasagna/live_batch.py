@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 from lasagna.app import generate_route_review_from_combined_csv
@@ -61,10 +62,7 @@ def run_live_batch(args: argparse.Namespace) -> Path:
         if not args.keep_combined_csv and combined_csv.exists():
             combined_csv.unlink()
         if not args.keep_combined_csv and scratch_dir.exists():
-            try:
-                scratch_dir.rmdir()
-            except OSError:
-                pass
+            shutil.rmtree(scratch_dir)
     return output_dir
 
 

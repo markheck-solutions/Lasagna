@@ -67,3 +67,4 @@ def test_live_batch_deletes_combined_csv_by_default(
     assert calls["output_dir"] == tmp_path
     assert calls["max_service_tabs"] == 25
     assert not (tmp_path / "_scratch" / "lasagna_combined_export.csv").exists()
+    assert not (tmp_path / "_scratch").exists()
