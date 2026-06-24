@@ -35,6 +35,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _cleanup_scratch_dir(scratch_dir: Path, combined_csv: Path) -> None:
+    """Remove raw export data; tolerate locked empty scratch dirs on synced desktops."""
+    if combined_csv.exists():
+        combined_csv.unlink()
+    if not scratch_dir.exists():
+        return
+    try:
+        shutil.rmtree(scratch_dir)
+    except OSError:
+        if any(scratch_dir.rglob("*.csv")):
+            raise
+
+
 def run_live_batch(args: argparse.Namespace) -> Path:
     """Run export, sort, workbook write, and raw export cleanup."""
     pasted_text = _read_ids(args)
@@ -59,10 +72,8 @@ def run_live_batch(args: argparse.Namespace) -> Path:
             max_service_tabs=args.max_service_tabs,
         )
     finally:
-        if not args.keep_combined_csv and combined_csv.exists():
-            combined_csv.unlink()
-        if not args.keep_combined_csv and scratch_dir.exists():
-            shutil.rmtree(scratch_dir)
+        if not args.keep_combined_csv:
+            _cleanup_scratch_dir(scratch_dir, combined_csv)
     return output_dir
 
 

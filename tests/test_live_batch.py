@@ -68,3 +68,23 @@ def test_live_batch_deletes_combined_csv_by_default(
     assert calls["max_service_tabs"] == 25
     assert not (tmp_path / "_scratch" / "lasagna_combined_export.csv").exists()
     assert not (tmp_path / "_scratch").exists()
+
+
+def test_live_batch_tolerates_locked_empty_scratch_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scratch_dir = tmp_path / "_scratch"
+    combined_csv = scratch_dir / "lasagna_combined_export.csv"
+    scratch_dir.mkdir()
+    combined_csv.write_text("QID,ROW_DATA\n", encoding="utf-8")
+
+    def fake_rmtree(path: Path) -> None:
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(live_batch.shutil, "rmtree", fake_rmtree)
+
+    live_batch._cleanup_scratch_dir(scratch_dir, combined_csv)
+
+    assert not combined_csv.exists()
+    assert scratch_dir.exists()
