@@ -39,3 +39,6 @@ if ($KeepCombinedCsv) {
 }
 
 python @argsList
+if ($LASTEXITCODE -ne 0) {
+    throw "Lasagna live batch failed with exit $LASTEXITCODE"
+}

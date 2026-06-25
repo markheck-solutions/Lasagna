@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -49,3 +50,36 @@ def test_installer_scripts_do_not_mutate_machine_path() -> None:
     assert "setx" not in script_text.lower()
     assert "Machine" not in script_text
     assert "IconLocation" in script_text
+
+
+def test_live_batch_script_fails_when_python_fails(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python.cmd"
+    fake_python.write_text(
+        "@echo off\necho fake python failed 1>&2\nexit /b 9\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/work_pc/run_lasagna_live_batch.ps1",
+            "-ServiceId",
+            "IC-123456",
+            "-OutputDir",
+            str(tmp_path / "out"),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "Lasagna live batch failed with exit 9" in result.stderr
