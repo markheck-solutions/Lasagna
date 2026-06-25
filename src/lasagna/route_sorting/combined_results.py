@@ -16,6 +16,13 @@ def _route_order_source(info_lines: list[str]) -> str:
     return "LEGACY_FALLBACK"
 
 
+def _bearer_message(info_lines: list[str]) -> str:
+    for line in info_lines:
+        if line.startswith("Bearer: "):
+            return line.removeprefix("Bearer: ").strip()
+    return ""
+
+
 def sort_combined_csv_to_service_results(
     combined_csv_path: Path,
     service_ids: list[str],
@@ -54,7 +61,7 @@ def sort_combined_csv_to_service_results(
             route_rows_from_inca(sorted_result.rows, site_locations),
             route_rows_from_inca(sorted_result.migration_portion or [], site_locations),
             route_order_source=_route_order_source(sorted_result.info_lines),
-            message="; ".join(sorted_result.info_lines),
+            message=_bearer_message(sorted_result.info_lines),
         )
 
     return results
