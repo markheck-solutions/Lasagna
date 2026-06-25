@@ -68,9 +68,16 @@ def _service_result(
     return service_results.get(service_id, ServiceRouteResult.no_data(service_id))
 
 
+def _write_cell_value(ws: Worksheet, row_number: int, column_number: int, value: CellValue) -> None:
+    cell = ws.cell(row=row_number, column=column_number)
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+
+
 def _write_row_values(ws: Worksheet, row_number: int, values: Iterable[CellValue]) -> None:
     for column_number, value in enumerate(values, start=1):
-        ws.cell(row=row_number, column=column_number, value=value)
+        _write_cell_value(ws, row_number, column_number, value)
 
 
 def _write_route_rows(ws: Worksheet, row_number: int, rows: tuple[RouteRow, ...]) -> int:
@@ -87,13 +94,13 @@ def _write_route_section(
     rows: tuple[RouteRow, ...],
     empty_message: str,
 ) -> int:
-    ws.cell(row=row_number, column=1, value=title)
+    _write_cell_value(ws, row_number, 1, title)
     row_number += 1
     _write_row_values(ws, row_number, ROUTE_COLUMNS)
     row_number += 1
     if rows:
         return _write_route_rows(ws, row_number, rows)
-    ws.cell(row=row_number, column=1, value=empty_message)
+    _write_cell_value(ws, row_number, 1, empty_message)
     return row_number + 1
 
 
@@ -101,12 +108,12 @@ def _write_service_sheet(
     ws: Worksheet,
     service_result: ServiceRouteResult,
 ) -> None:
-    ws.cell(row=1, column=1, value="Service ID")
-    ws.cell(row=1, column=2, value=service_result.service_id)
-    ws.cell(row=2, column=1, value="Status")
-    ws.cell(row=2, column=2, value=service_result.status)
-    ws.cell(row=3, column=1, value="Message")
-    ws.cell(row=3, column=2, value=service_result.message)
+    _write_cell_value(ws, 1, 1, "Service ID")
+    _write_cell_value(ws, 1, 2, service_result.service_id)
+    _write_cell_value(ws, 2, 1, "Status")
+    _write_cell_value(ws, 2, 2, service_result.status)
+    _write_cell_value(ws, 3, 1, "Message")
+    _write_cell_value(ws, 3, 2, service_result.message)
 
     row_number = _write_route_section(
         ws,

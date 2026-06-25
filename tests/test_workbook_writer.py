@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
@@ -142,3 +143,43 @@ def test_writer_keeps_service_failures_isolated(tmp_path: Path) -> None:
         assert summary_statuses == ["OK", "SORT FAILED", "NO DATA"]
     finally:
         workbook.close()
+
+
+def test_writer_keeps_route_text_literals_out_of_formula_xml(tmp_path: Path) -> None:
+    parsed = parse_service_id_text("IC-777777")
+    special_rows = tuple(
+        _route_row("ALPHA", route_path, str(index))
+        for index, route_path in enumerate(("=A1", "+PLUS", "-MINUS", "@AT"), start=1)
+    )
+    service_results = {
+        "IC-777777": ServiceRouteResult.ok(
+            "IC-777777",
+            special_rows,
+            route_order_source="=SOURCE",
+            message="=BEARER",
+        )
+    }
+
+    [result] = write_route_workbooks(parsed, service_results, tmp_path)
+
+    workbook = load_workbook(result.path, data_only=False)
+    try:
+        sheet = workbook["IC-777777"]
+        assert [sheet[f"K{row}"].value for row in range(7, 11)] == [
+            "=A1",
+            "+PLUS",
+            "-MINUS",
+            "@AT",
+        ]
+        assert workbook["Summary"]["I2"].value == "=SOURCE"
+        assert workbook["Summary"]["J2"].value == "=BEARER"
+    finally:
+        workbook.close()
+
+    with ZipFile(result.path) as workbook_zip:
+        worksheet_xml = [
+            workbook_zip.read(name)
+            for name in workbook_zip.namelist()
+            if name.startswith("xl/worksheets/")
+        ]
+    assert all(b"<f" not in xml for xml in worksheet_xml)

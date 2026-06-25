@@ -457,6 +457,12 @@ class InterSiteTrunkBlock(NamedTuple):
     site: str
 
 
+class InterSiteTrunkSegment(NamedTuple):
+    insert_at: int
+    row_indices: frozenset[int]
+    rows: list[InCARow]
+
+
 def _populate_display_points(rows: list[InCARow]) -> None:
     """Populate display_points for NE-Location router rows (PP-062).
 
@@ -557,6 +563,121 @@ def _build_interleaved_trunk_rows(
     return interleaved_rows
 
 
+def _inter_site_trunk_endpoint_lookup(
+    trunk_edges: list[tuple[str, str, str]],
+) -> dict[str, tuple[str, str]]:
+    """Return unambiguous inter-site trunk endpoints by route path."""
+    endpoints: dict[str, tuple[str, str]] = {}
+    ambiguous: set[str] = set()
+    for left_site, right_site, route_path in trunk_edges:
+        if left_site == right_site or route_path in ambiguous:
+            continue
+        endpoint_pair = (left_site, right_site)
+        if route_path in endpoints and endpoints[route_path] != endpoint_pair:
+            ambiguous.add(route_path)
+            del endpoints[route_path]
+            continue
+        endpoints[route_path] = endpoint_pair
+    return endpoints
+
+
+def _blocks_by_route_path(
+    blocks: list[InterSiteTrunkBlock],
+) -> dict[str, list[InterSiteTrunkBlock]]:
+    """Group collected inter-site blocks by trunk route path."""
+    grouped: dict[str, list[InterSiteTrunkBlock]] = defaultdict(list)
+    for block in blocks:
+        grouped[block.route_path].append(block)
+    return grouped
+
+
+def _has_complete_endpoint_blocks(
+    blocks: list[InterSiteTrunkBlock],
+    endpoints: tuple[str, str],
+) -> bool:
+    """Return whether a trunk has exactly one passive block at each endpoint."""
+    if len(blocks) != 2:
+        return False
+    block_sites = {block.site for block in blocks}
+    return len(block_sites) == 2 and block_sites == set(endpoints)
+
+
+def _rows_for_block(
+    sorted_rows: list[InCARow],
+    block: InterSiteTrunkBlock,
+) -> list[InCARow]:
+    """Return rows covered by one contiguous trunk endpoint block."""
+    return list(sorted_rows[block.start : block.end])
+
+
+def _build_position_grouped_trunk_rows(
+    first_rows: list[InCARow],
+    second_rows: list[InCARow],
+) -> list[InCARow]:
+    """Group endpoint blocks by current site direction and POS fallback."""
+    return sorted(first_rows, key=lambda row: (row.pos, row.row_index)) + sorted(
+        second_rows,
+        key=lambda row: (row.pos, row.row_index),
+    )
+
+
+def _build_trunk_segment_rows(
+    sorted_rows: list[InCARow],
+    blocks: list[InterSiteTrunkBlock],
+) -> list[InCARow]:
+    """Build grouped rows for one complete inter-site trunk segment."""
+    ordered_blocks = sorted(blocks, key=lambda block: block.start)
+    first_rows = _rows_for_block(sorted_rows, ordered_blocks[0])
+    second_rows = _rows_for_block(sorted_rows, ordered_blocks[1])
+    interleaved_rows = _build_interleaved_trunk_rows(first_rows, second_rows)
+    if interleaved_rows is not None:
+        return interleaved_rows
+    return _build_position_grouped_trunk_rows(first_rows, second_rows)
+
+
+def _build_inter_site_trunk_segments(
+    sorted_rows: list[InCARow],
+    blocks: list[InterSiteTrunkBlock],
+    endpoint_lookup: dict[str, tuple[str, str]],
+) -> list[InterSiteTrunkSegment]:
+    """Build safe segment moves for complete crossed inter-site trunks."""
+    segments: list[InterSiteTrunkSegment] = []
+    for route_path, route_blocks in _blocks_by_route_path(blocks).items():
+        endpoints = endpoint_lookup.get(route_path)
+        if endpoints is None or not _has_complete_endpoint_blocks(route_blocks, endpoints):
+            continue
+        ordered_blocks = sorted(route_blocks, key=lambda block: block.start)
+        row_indices = frozenset(
+            row_index for block in ordered_blocks for row_index in range(block.start, block.end)
+        )
+        segments.append(
+            InterSiteTrunkSegment(
+                insert_at=ordered_blocks[0].start,
+                row_indices=row_indices,
+                rows=_build_trunk_segment_rows(sorted_rows, ordered_blocks),
+            )
+        )
+    return sorted(segments, key=lambda segment: segment.insert_at)
+
+
+def _apply_inter_site_trunk_segments(
+    sorted_rows: list[InCARow],
+    segments: list[InterSiteTrunkSegment],
+) -> list[InCARow]:
+    """Move complete trunk segments to first occurrence and keep other rows stable."""
+    segment_by_start = {segment.insert_at: segment for segment in segments}
+    consumed_indices = {row_index for segment in segments for row_index in segment.row_indices}
+    result: list[InCARow] = []
+    for row_index, row in enumerate(sorted_rows):
+        segment = segment_by_start.get(row_index)
+        if segment is not None:
+            result.extend(segment.rows)
+        if row_index in consumed_indices:
+            continue
+        result.append(row)
+    return result
+
+
 def _interleave_inter_site_trunk_pairs(
     sorted_rows: list[InCARow],
     trunk_edges: list[tuple[str, str, str]],
@@ -578,26 +699,16 @@ def _interleave_inter_site_trunk_pairs(
     Returns:
         New list with inter-site trunk blocks interleaved by position.
     """
-    inter_site_trunks = {name for left, right, name in trunk_edges if left != right}
-    if not inter_site_trunks:
+    endpoint_lookup = _inter_site_trunk_endpoint_lookup(trunk_edges)
+    if not endpoint_lookup:
         return sorted_rows
 
-    blocks = _collect_inter_site_trunk_blocks(sorted_rows, inter_site_trunks)
-    merge_groups = _find_mergeable_inter_site_blocks(blocks, sorted_rows)
-    if not merge_groups:
+    blocks = _collect_inter_site_trunk_blocks(sorted_rows, set(endpoint_lookup))
+    segments = _build_inter_site_trunk_segments(sorted_rows, blocks, endpoint_lookup)
+    if not segments:
         return sorted_rows
 
-    result = list(sorted_rows)
-    for block_a, block_b in reversed(merge_groups):
-        interleaved_rows = _build_interleaved_trunk_rows(
-            sorted_rows[block_a.start : block_a.end],
-            sorted_rows[block_b.start : block_b.end],
-        )
-        if interleaved_rows is None:
-            continue
-        separators = list(sorted_rows[block_a.end : block_b.start])
-        result[block_a.start : block_b.end] = interleaved_rows + separators
-    return result
+    return _apply_inter_site_trunk_segments(sorted_rows, segments)
 
 
 class PreparedRouteSort(NamedTuple):
@@ -1118,7 +1229,7 @@ def _prepare_route_sort(
         site_location_ids=site_location_ids,
         trunk_media_lookup=trunk_media_lookup,
         trunk_route_rank=trunk_route_rank,
-        metadata_canonical_order=canonical_route_order is not None or bool(trunk_route_rank),
+        metadata_canonical_order=canonical_route_order is not None,
     )
 
 
