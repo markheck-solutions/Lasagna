@@ -463,6 +463,18 @@ class InterSiteTrunkSegment(NamedTuple):
     rows: list[InCARow]
 
 
+class SameLocationHandoffAnchor(NamedTuple):
+    trunk_route_path: str
+    outer_site: str
+    handoff_site: str
+
+
+class DeviceHandoffSegment(NamedTuple):
+    insert_after: int
+    row_indices: frozenset[int]
+    rows: list[InCARow]
+
+
 def _populate_display_points(rows: list[InCARow]) -> None:
     """Populate display_points for NE-Location router rows (PP-062).
 
@@ -709,6 +721,267 @@ def _interleave_inter_site_trunk_pairs(
         return sorted_rows
 
     return _apply_inter_site_trunk_segments(sorted_rows, segments)
+
+
+def _site_types_for_trunk_endpoint(
+    rows: list[InCARow],
+    route_path: str,
+    site: str,
+) -> set[str]:
+    """Return passive endpoint site types for one trunk route path."""
+    return {
+        row.site_type
+        for row in rows
+        if row.route_path == route_path
+        and row.site_code == site
+        and not row.is_device_row
+        and not row.is_demarcation
+    }
+
+
+def _same_location_handoff_site(
+    left_site: str,
+    right_site: str,
+    route_path: str,
+    rows: list[InCARow],
+    site_location_ids: dict[str, str | None],
+) -> tuple[str, str] | None:
+    """Return outer/handoff sites for same-building U-to-XS trunk handoff."""
+    left_location = site_location_ids.get(left_site)
+    right_location = site_location_ids.get(right_site)
+    if not left_location or left_location != right_location:
+        return None
+
+    left_types = _site_types_for_trunk_endpoint(rows, route_path, left_site)
+    right_types = _site_types_for_trunk_endpoint(rows, route_path, right_site)
+    if "U" in left_types and "XS" in right_types:
+        return left_site, right_site
+    if "U" in right_types and "XS" in left_types:
+        return right_site, left_site
+    return None
+
+
+def _same_location_handoff_anchors(
+    rows: list[InCARow],
+    trunk_edges: list[tuple[str, str, str]],
+    site_location_ids: dict[str, str | None] | None,
+) -> list[SameLocationHandoffAnchor]:
+    """Find same-location U/XS trunk endpoints that can anchor a device hop."""
+    if not site_location_ids:
+        return []
+
+    anchors: list[SameLocationHandoffAnchor] = []
+    for left_site, right_site, route_path in trunk_edges:
+        if left_site == right_site:
+            continue
+        handoff_pair = _same_location_handoff_site(
+            left_site,
+            right_site,
+            route_path,
+            rows,
+            site_location_ids,
+        )
+        if handoff_pair is None:
+            continue
+        outer_site, handoff_site = handoff_pair
+        anchors.append(
+            SameLocationHandoffAnchor(
+                trunk_route_path=route_path,
+                outer_site=outer_site,
+                handoff_site=handoff_site,
+            )
+        )
+    return anchors
+
+
+def _site_tl_map(
+    tl_device_map: dict[tuple[str, str], dict[str, list[str]]],
+    service_id: str | None,
+    site: str,
+) -> dict[str, list[str]]:
+    """Return TL_DEVICE map for one site, scoped by service when known."""
+    if service_id:
+        return tl_device_map.get((service_id, site), {})
+
+    matches = [
+        site_map for (_sid, site_code), site_map in tl_device_map.items() if site_code == site
+    ]
+    return matches[0] if len(matches) == 1 else {}
+
+
+def _matching_device_row_indices(
+    rows: list[InCARow],
+    site: str,
+    ne_parts: list[str],
+) -> list[int]:
+    """Return device row positions whose NE Information contains TL_DEVICE parts."""
+    return [
+        index
+        for index, row in enumerate(rows)
+        if row.site_code == site
+        and row.is_device_row
+        and not row.is_demarcation
+        and row.ne_info
+        and any(ne_part in row.ne_info for ne_part in ne_parts)
+    ]
+
+
+def _remote_site_for_tl(
+    tl_name: str,
+    handoff_site: str,
+    known_sites: set[str],
+    service_id: str | None,
+) -> str | None:
+    """Resolve TL remote site from structured TL endpoint/name data."""
+    if not service_id:
+        service_id = ""
+    return _resolve_remote_site_from_tl_name(
+        tl_name,
+        handoff_site,
+        known_sites,
+        service_id=service_id,
+    )
+
+
+def _trunk_segment_end_index(
+    rows: list[InCARow],
+    route_path: str,
+) -> int | None:
+    """Return final passive row index for a grouped trunk segment."""
+    positions = [
+        index
+        for index, row in enumerate(rows)
+        if row.route_path == route_path and not row.is_device_row and not row.is_demarcation
+    ]
+    return max(positions) if positions else None
+
+
+def _handoff_device_segment(
+    rows: list[InCARow],
+    anchor: SameLocationHandoffAnchor,
+    local_ne_parts: list[str],
+    remote_site: str,
+    remote_ne_parts: list[str],
+) -> DeviceHandoffSegment | None:
+    """Build one TL_DEVICE-proven device handoff segment."""
+    insert_after = _trunk_segment_end_index(rows, anchor.trunk_route_path)
+    if insert_after is None:
+        return None
+
+    local_indices = _matching_device_row_indices(rows, anchor.handoff_site, local_ne_parts)
+    remote_indices = _matching_device_row_indices(rows, remote_site, remote_ne_parts)
+    if not local_indices or not remote_indices:
+        return None
+
+    ordered_indices = local_indices + remote_indices
+    return DeviceHandoffSegment(
+        insert_after=insert_after,
+        row_indices=frozenset(ordered_indices),
+        rows=[rows[index] for index in ordered_indices],
+    )
+
+
+def _handoff_segments_for_anchor(
+    rows: list[InCARow],
+    anchor: SameLocationHandoffAnchor,
+    tl_device_map: dict[tuple[str, str], dict[str, list[str]]],
+    service_id: str | None,
+    known_sites: set[str],
+    claimed_indices: set[int],
+) -> list[DeviceHandoffSegment]:
+    """Build device handoff segments for one same-location trunk endpoint."""
+    segments: list[DeviceHandoffSegment] = []
+    local_tl_map = _site_tl_map(tl_device_map, service_id, anchor.handoff_site)
+    for tl_name, local_ne_parts in local_tl_map.items():
+        remote_site = _remote_site_for_tl(tl_name, anchor.handoff_site, known_sites, service_id)
+        remote_ne_parts = _site_tl_map(tl_device_map, service_id, remote_site or "").get(
+            tl_name,
+            [],
+        )
+        if not remote_site or not remote_ne_parts:
+            continue
+        segment = _handoff_device_segment(
+            rows,
+            anchor,
+            local_ne_parts,
+            remote_site,
+            remote_ne_parts,
+        )
+        if segment is None or segment.row_indices & claimed_indices:
+            continue
+        claimed_indices.update(segment.row_indices)
+        segments.append(segment)
+    return segments
+
+
+def _build_same_location_device_handoff_segments(
+    rows: list[InCARow],
+    anchors: list[SameLocationHandoffAnchor],
+    tl_device_map: dict[tuple[str, str], dict[str, list[str]]],
+    service_id: str | None,
+) -> list[DeviceHandoffSegment]:
+    """Build all TL_DEVICE-proven same-location handoff moves."""
+    known_sites = {row.site_code for row in rows if row.site_code}
+    claimed_indices: set[int] = set()
+    segments: list[DeviceHandoffSegment] = []
+    for anchor in anchors:
+        segments.extend(
+            _handoff_segments_for_anchor(
+                rows,
+                anchor,
+                tl_device_map,
+                service_id,
+                known_sites,
+                claimed_indices,
+            )
+        )
+    return sorted(segments, key=lambda segment: (segment.insert_after, min(segment.row_indices)))
+
+
+def _apply_device_handoff_segments(
+    rows: list[InCARow],
+    segments: list[DeviceHandoffSegment],
+) -> list[InCARow]:
+    """Move TL_DEVICE-proven device hops after their local ODF handoff."""
+    if not segments:
+        return rows
+
+    segments_by_insert_after: dict[int, list[DeviceHandoffSegment]] = defaultdict(list)
+    consumed_indices = {index for segment in segments for index in segment.row_indices}
+    for segment in segments:
+        segments_by_insert_after[segment.insert_after].append(segment)
+
+    result: list[InCARow] = []
+    for index, row in enumerate(rows):
+        if index not in consumed_indices:
+            result.append(row)
+        for segment in segments_by_insert_after.get(index, []):
+            result.extend(segment.rows)
+    return result
+
+
+def _apply_same_location_device_handoffs(
+    rows: list[InCARow],
+    trunk_edges: list[tuple[str, str, str]],
+    site_location_ids: dict[str, str | None] | None,
+    tl_device_map: dict[tuple[str, str], dict[str, list[str]]] | None,
+    service_id: str | None,
+) -> list[InCARow]:
+    """Keep same-building U/XS handoff device rows with their trunk endpoint."""
+    if not tl_device_map:
+        return rows
+
+    anchors = _same_location_handoff_anchors(rows, trunk_edges, site_location_ids)
+    if not anchors:
+        return rows
+
+    segments = _build_same_location_device_handoff_segments(
+        rows,
+        anchors,
+        tl_device_map,
+        service_id,
+    )
+    return _apply_device_handoff_segments(rows, segments)
 
 
 class PreparedRouteSort(NamedTuple):
@@ -1289,11 +1562,19 @@ def _append_location_id_groups(
 def _canonical_sorted_rows(
     sorted_rows: list[InCARow],
     prepared: PreparedRouteSort,
+    service_id: str | None,
 ) -> list[InCARow]:
     """Return the one row order consumed by display/export and ticket generation."""
     if prepared.metadata_canonical_order:
         return list(sorted_rows)
-    return _interleave_inter_site_trunk_pairs(sorted_rows, prepared.trunk_edges)
+    trunk_grouped_rows = _interleave_inter_site_trunk_pairs(sorted_rows, prepared.trunk_edges)
+    return _apply_same_location_device_handoffs(
+        trunk_grouped_rows,
+        prepared.trunk_edges,
+        prepared.site_location_ids,
+        prepared.tl_device_map,
+        service_id,
+    )
 
 
 def _sort_migration_route(
@@ -1386,8 +1667,8 @@ def _sort_migration_route(
     _populate_display_points(sorted_before)
     _populate_display_points(sorted_after)
 
-    canonical_before = _canonical_sorted_rows(sorted_before, prepared)
-    canonical_after = _canonical_sorted_rows(sorted_after, prepared)
+    canonical_before = _canonical_sorted_rows(sorted_before, prepared, service_id)
+    canonical_after = _canonical_sorted_rows(sorted_after, prepared, service_id)
     patch_class = classify_patch_points(canonical_after)
     migration_portion = build_migration_portion(canonical_after, patch_class)
     decom_from_before = [row for row in canonical_before if row.classification == "DECOMMISSION"]
@@ -1439,7 +1720,7 @@ def _sort_standard_route(
         trunk_route_rank=prepared.trunk_route_rank,
     )
     _populate_display_points(sorted_rows)
-    canonical_rows = _canonical_sorted_rows(sorted_rows, prepared)
+    canonical_rows = _canonical_sorted_rows(sorted_rows, prepared, service_id)
     tickets = generate_tickets(
         canonical_rows,
         prepared.site_order,
