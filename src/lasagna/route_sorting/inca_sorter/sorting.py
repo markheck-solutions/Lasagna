@@ -647,6 +647,15 @@ class CanonicalRouteOrder(NamedTuple):
     b_site: str
 
 
+class RouteOrderFacts(NamedTuple):
+    required_route_paths: list[str]
+    edges: list[CanonicalRouteEdge]
+    endpoint_lookup: dict[str, tuple[str, str]]
+    site_location_ids: dict[str, str | None]
+    site_sides: dict[tuple[str, str], str]
+    media_lookup: dict[str, str]
+
+
 class SortedRouteArtifacts(NamedTuple):
     items: list[InCARow]
     migration_portion: list[InCARow] | None
@@ -812,28 +821,23 @@ def _validate_route_order_required_edges(
         _raise_route_order_error(service_id, f"missing fact(s): {', '.join(missing_facts)}")
 
 
-def _validate_route_order_site_coverage(
+def _route_order_covers_row_sites(
     rows: list[InCARow],
     site_order: list[str],
-    service_id: str | None,
-) -> None:
-    """Fail closed when PM rows contain sites outside canonical order."""
+) -> bool:
+    """Return whether canonical route order covers every row site."""
     ordered_sites = set(site_order)
     missing_sites = sorted({row.site_code for row in rows if row.site_code} - ordered_sites)
-    if missing_sites:
-        _raise_route_order_error(
-            service_id,
-            f"missing site order for site(s): {', '.join(missing_sites)}",
-        )
+    return not missing_sites
 
 
-def _build_canonical_route_order(
+def _build_route_order_facts(
     rows: list[InCARow],
     bearer: str,
     route_order_metadata_records: list[dict] | None,
     service_id: str | None,
-) -> CanonicalRouteOrder | None:
-    """Build route order from ROUTE_ORDER_METADATA when PM records are supplied."""
+) -> RouteOrderFacts | None:
+    """Build endpoint facts from ROUTE_ORDER_METADATA when PM records are supplied."""
     if route_order_metadata_records is None:
         return None
 
@@ -848,14 +852,37 @@ def _build_canonical_route_order(
     edges = _ordered_route_order_edges(records)
     edges_by_route = {edge.route_path: edge for edge in edges}
     _validate_route_order_required_edges(edges_by_route, required_route_paths, service_id)
-    site_order = _derive_canonical_site_order(edges)
-    _validate_route_order_site_coverage(rows, site_order, service_id)
 
     endpoint_lookup, site_location_ids, site_sides, media_lookup = _route_order_lookups(edges)
+    return RouteOrderFacts(
+        required_route_paths=required_route_paths,
+        edges=edges,
+        endpoint_lookup=endpoint_lookup,
+        site_location_ids=site_location_ids,
+        site_sides=site_sides,
+        media_lookup=media_lookup,
+    )
+
+
+def _build_canonical_route_order(
+    rows: list[InCARow],
+    route_order_facts: RouteOrderFacts | None,
+) -> CanonicalRouteOrder | None:
+    """Build route order only when ROUTE_ORDER_METADATA covers the display path."""
+    if route_order_facts is None:
+        return None
+
+    edges = route_order_facts.edges
+    site_order = _derive_canonical_site_order(edges)
+    if not _route_order_covers_row_sites(rows, site_order):
+        return None
+
     route_rank = {
         route_path: index
         for index, route_path in enumerate(
-            edge.route_path for edge in edges if edge.route_path in required_route_paths
+            edge.route_path
+            for edge in edges
+            if edge.route_path in route_order_facts.required_route_paths
         )
     }
     site_rank = {site: index for index, site in enumerate(site_order)}
@@ -865,10 +892,10 @@ def _build_canonical_route_order(
         site_order=site_order,
         site_rank=site_rank,
         route_rank=route_rank,
-        endpoint_lookup=endpoint_lookup,
-        site_location_ids=site_location_ids,
-        site_sides=site_sides,
-        media_lookup=media_lookup,
+        endpoint_lookup=route_order_facts.endpoint_lookup,
+        site_location_ids=route_order_facts.site_location_ids,
+        site_sides=route_order_facts.site_sides,
+        media_lookup=route_order_facts.media_lookup,
         a_site=site_order[0],
         b_site=site_order[-1],
     )
@@ -991,17 +1018,23 @@ def _prepare_route_sort(
     populate_trunk_media(rows, trunk_media_lookup)
 
     trunk_endpoint_lookup = build_trunk_endpoint_lookup(trunk_metadata_records)
+    metadata_trunk_names = set(trunk_endpoint_lookup)
     transmission_endpoint_lookup = build_transmission_endpoint_lookup(
         transmission_metadata_records,
     )
 
     endpoints = resolve_route_endpoints(rows)
-    canonical_route_order = _build_canonical_route_order(
+    route_order_facts = _build_route_order_facts(
         rows,
         endpoints.bearer or "",
         route_order_metadata_records,
         service_id,
     )
+    if route_order_facts is not None:
+        trunk_endpoint_lookup.update(route_order_facts.endpoint_lookup)
+        trunk_media_lookup.update(route_order_facts.media_lookup)
+
+    canonical_route_order = _build_canonical_route_order(rows, route_order_facts)
     if canonical_route_order is not None:
         trunk_endpoint_lookup.update(canonical_route_order.endpoint_lookup)
         trunk_media_lookup.update(canonical_route_order.media_lookup)
@@ -1015,7 +1048,6 @@ def _prepare_route_sort(
                 "Route order: ROUTE_ORDER_METADATA",
             ],
         )
-    metadata_trunk_names = set(trunk_endpoint_lookup)
     metadata_completeness = _metadata_completeness(
         rows,
         endpoints.bearer or "",
@@ -1047,6 +1079,7 @@ def _prepare_route_sort(
     site_location_ids = _merge_site_location_ids(
         _build_site_location_ids(hub_records),
         canonical_route_order,
+        route_order_facts,
     )
     site_order = route_topology.site_order
     if canonical_route_order is None and service_mode(service_id) == "ICB":
@@ -1108,12 +1141,14 @@ def _build_site_location_ids(
 def _merge_site_location_ids(
     hub_location_ids: dict[str, str | None] | None,
     canonical_route_order: CanonicalRouteOrder | None,
+    route_order_facts: RouteOrderFacts | None,
 ) -> dict[str, str | None] | None:
     """Merge hub and route-order location IDs with PM route order as authority."""
-    if canonical_route_order is None:
-        return hub_location_ids
     merged = dict(hub_location_ids or {})
-    merged.update(canonical_route_order.site_location_ids)
+    if route_order_facts is not None:
+        merged.update(route_order_facts.site_location_ids)
+    if canonical_route_order is not None:
+        merged.update(canonical_route_order.site_location_ids)
     return merged or None
 
 
