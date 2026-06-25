@@ -48,3 +48,14 @@ def test_sql_template_contains_route_qids_and_no_pm_seed_tables() -> None:
         assert qid in template
     assert "prod_service_seed_sdm_orders" not in template
     assert "prod_service_seed_manual_migrations" not in template
+
+
+def test_route_order_metadata_is_scoped_to_exported_route_paths() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+
+    assert "CREATE OR REPLACE TEMP TABLE prod_route_order_relevant_edges AS" in template
+    assert "WHERE qid IN ('TRUNK_ODF', 'DEVICE', 'DP_SDP')" in template
+    assert "JOIN prod_route_order_relevant_edges relevant_edges" in template
+    assert "relevant_edges.ROUTE_PATH = walk.edge_name" in template
+    assert "CREATE OR REPLACE TEMP TABLE prod_site_location_rows AS" in template
+    assert "SELECT DISTINCT\n    ranked.service_id AS SERVICE_ID" in template

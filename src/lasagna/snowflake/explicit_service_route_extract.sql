@@ -803,6 +803,22 @@ INSERT INTO prod_all SELECT 'SITE_METADATA', OBJECT_CONSTRUCT(
     'GEO_LONGITUDE', GEO_LONGITUDE
 )
 FROM prod_site_metadata_rows;
+-- Role: prod_site_location_rows product route-order metadata intermediate.
+
+CREATE OR REPLACE TEMP TABLE prod_site_location_rows AS
+SELECT SITE_CODE, MAX(SITE_LOCATION_ID) AS SITE_LOCATION_ID
+FROM prod_site_metadata_rows
+GROUP BY SITE_CODE;
+-- Role: prod_route_order_relevant_edges product route-order metadata intermediate.
+
+CREATE OR REPLACE TEMP TABLE prod_route_order_relevant_edges AS
+SELECT DISTINCT
+    row_data:SERVICE_ID::VARCHAR AS SERVICE_ID,
+    row_data:ROUTE_PATH::VARCHAR AS ROUTE_PATH
+FROM prod_all
+WHERE qid IN ('TRUNK_ODF', 'DEVICE', 'DP_SDP')
+  AND row_data:SERVICE_ID IS NOT NULL
+  AND row_data:ROUTE_PATH IS NOT NULL;
 -- Role: prod_route_order_position_rows product route-order metadata intermediate.
 
 ----------------------------------------------------------------------
@@ -812,15 +828,18 @@ FROM prod_site_metadata_rows;
 ----------------------------------------------------------------------
 CREATE OR REPLACE TEMP TABLE prod_route_order_position_rows AS
 SELECT
-    service_id,
-    edge_name,
-    MIN(edge_position) AS edge_position,
-    MIN(edge_position_id) AS edge_position_id
-FROM prod_edge_walk
-WHERE level_no > 1
-  AND edge_name IS NOT NULL
-  AND edge_position IS NOT NULL
-GROUP BY service_id, edge_name;
+    walk.service_id,
+    walk.edge_name,
+    MIN(walk.edge_position) AS edge_position,
+    MIN(walk.edge_position_id) AS edge_position_id
+FROM prod_edge_walk walk
+JOIN prod_route_order_relevant_edges relevant_edges
+    ON relevant_edges.SERVICE_ID = walk.service_id
+    AND relevant_edges.ROUTE_PATH = walk.edge_name
+WHERE walk.level_no > 1
+  AND walk.edge_name IS NOT NULL
+  AND walk.edge_position IS NOT NULL
+GROUP BY walk.service_id, walk.edge_name;
 -- Role: prod_route_order_site_sides product route-order side metadata intermediate.
 
 CREATE OR REPLACE TEMP TABLE prod_route_order_site_sides AS
@@ -838,7 +857,7 @@ WHERE qid = 'TRUNK_ODF'
 -- Role: prod_route_order_metadata_rows product route-order contract rows.
 
 CREATE OR REPLACE TEMP TABLE prod_route_order_metadata_rows AS
-SELECT
+SELECT DISTINCT
     ranked.service_id AS SERVICE_ID,
     ranked.edge_name AS ROUTE_PATH,
     ranked.edge_sequence AS EDGE_SEQUENCE,
@@ -864,9 +883,9 @@ LEFT JOIN prod_trunk_metadata_rows pcg
     ON pcg.BPK_PCG = ranked.edge_name
 LEFT JOIN prod_transmission_metadata_rows tx
     ON tx.BPK_TRANSMISSION = ranked.edge_name
-LEFT JOIN prod_site_metadata_rows a_site
+LEFT JOIN prod_site_location_rows a_site
     ON a_site.SITE_CODE = COALESCE(pcg.A_SITE_CODE, tx.A_SITE_CODE)
-LEFT JOIN prod_site_metadata_rows b_site
+LEFT JOIN prod_site_location_rows b_site
     ON b_site.SITE_CODE = COALESCE(pcg.B_SITE_CODE, tx.B_SITE_CODE)
 LEFT JOIN prod_route_order_site_sides a_side
     ON a_side.service_id = ranked.service_id
