@@ -714,7 +714,8 @@ def phase_write_final_status(state: RunState) -> None:
     )
     write_json_artifact(state.run_dir / "golden_blocker_corpus.json", {"cases": []})
     write_json_artifact(state.run_dir / "golden_blocker_results.json", {"status": INCOMPLETE})
-    write_negative_ledger(state, hashes, statuses)
+    if should_write_negative_ledger(state):
+        write_negative_ledger(state, hashes, statuses)
     state.run_manifest["run_status"] = PASS if state.config.phase_mode != "full" else INCOMPLETE
     state.run_manifest["completed_at"] = utc_now()
     refresh_run_manifest_counts(state)
@@ -801,6 +802,14 @@ def write_negative_ledger(
     if not getattr(closure, "fixed_point_reached", False):
         ledger["negative_evidence_allowed"] = False
     write_json_artifact(state.run_dir / "negative_evidence_ledger_entry.json", ledger)
+
+
+def should_write_negative_ledger(state: RunState) -> bool:
+    if state.config.phase_mode != "full":
+        return False
+    if not isinstance(state.closure, GraphClosureResult):
+        return False
+    return state.closure.fixed_point_reached and not state.closure.incomplete_areas
 
 
 def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception) -> None:

@@ -352,6 +352,7 @@ def test_metadata_only_mode_does_not_run_exact_id_scan_or_graph_closure(
         ]
         is False
     )
+    assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
 
 
 def test_seed_only_mode_does_not_run_graph_closure(tmp_path: Path) -> None:
@@ -392,6 +393,7 @@ def test_negative_evidence_not_allowed_after_timeout_incomplete(tmp_path: Path) 
     assert payload["fixed_point_reached"] is False
     statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
     assert statuses["Negative evidence ledger"]["status"] == INCOMPLETE
+    assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
 
 
 def test_manifest_and_current_sql_are_seed_sources_not_boundaries() -> None:
