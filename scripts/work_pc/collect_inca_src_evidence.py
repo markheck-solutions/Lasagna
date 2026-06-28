@@ -1304,7 +1304,45 @@ def anchor_profiles(profiles: list[ColumnProfile]) -> list[ColumnProfile]:
         for profile in profiles
         if canonical_data_type(profile.data_type) in TEXT_TYPES
         and not data_type_is_rejected(profile.data_type)
+        and is_service_anchor_column(profile.column_name)
     ]
+
+
+def is_service_anchor_column(column_name: str) -> bool:
+    upper = column_name.upper()
+    exact_names = {
+        "SERVICE",
+        "SERVICE_ID",
+        "SERVICE_NAME",
+        "SERVICE_NR",
+        "SERVICE_NUMBER",
+        "SERVICE_CODE",
+        "SERVICE_IDENTIFIER",
+        "CIRCUIT",
+        "CIRCUIT_ID",
+        "CIRCUIT_NAME",
+        "CIRCUIT_NR",
+        "CIRCUIT_NUMBER",
+        "CIRCUIT_CODE",
+        "CIRCUIT_IDENTIFIER",
+    }
+    if upper in exact_names:
+        return True
+    suffixes = (
+        "_SERVICE",
+        "_SERVICE_ID",
+        "_SERVICE_NAME",
+        "_SERVICE_NR",
+        "_SERVICE_NUMBER",
+        "_SERVICE_CODE",
+        "_CIRCUIT",
+        "_CIRCUIT_ID",
+        "_CIRCUIT_NAME",
+        "_CIRCUIT_NR",
+        "_CIRCUIT_NUMBER",
+        "_CIRCUIT_CODE",
+    )
+    return upper.endswith(suffixes)
 
 
 def scan_evidence_graph(

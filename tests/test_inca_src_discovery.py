@@ -534,6 +534,88 @@ def test_seed_only_mode_does_not_run_graph_closure(tmp_path: Path) -> None:
     )
 
 
+def test_seed_anchor_profiles_are_deterministic_service_columns_only() -> None:
+    profiles = [
+        column("SERVICE_ID", "VARCHAR", None),
+        column("A_SERVICE_NAME", "VARCHAR", None),
+        column("CIRCUIT_ID", "VARCHAR", None),
+        column("PCG_POS", "VARCHAR", None),
+        column("STATUS_O_TIME", "VARCHAR", None),
+        column("TM_TIMESTAMP", "VARCHAR", None),
+        column("ROUTE_NAME", "VARCHAR", None),
+        column("CONTENT_INT_ID"),
+    ]
+
+    observed = {profile.column_name for profile in collector.anchor_profiles(profiles)}
+
+    assert observed == {"SERVICE_ID", "A_SERVICE_NAME", "CIRCUIT_ID"}
+
+
+def test_seed_extraction_does_not_scan_current_utilization_non_service_columns(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="seed-only")
+    state = collector.initialize_run(args)
+    target_object = "V_T_INCATNT_PCG_UTILIZATION_CURRENT"
+    route_object = "ROUTE_RELATION"
+    route_service = ColumnProfile(
+        database="PROD_ACCESS_DB",
+        schema="INCA_SRC",
+        object_name=route_object,
+        object_type="BASE TABLE",
+        column_name="SERVICE_ID",
+        ordinal_position=1,
+        data_type="VARCHAR",
+        numeric_scale=None,
+        is_nullable="YES",
+    )
+    route_content = ColumnProfile(
+        **{
+            **column("CONTENT_INT_ID").__dict__,
+            "object_name": route_object,
+            "ordinal_position": 2,
+        }
+    )
+    utilization_profiles = [
+        ColumnProfile(
+            database="PROD_ACCESS_DB",
+            schema="INCA_SRC",
+            object_name=target_object,
+            object_type="VIEW",
+            column_name=name,
+            ordinal_position=index,
+            data_type=data_type,
+            numeric_scale=None if data_type == "VARCHAR" else 0,
+            is_nullable="YES",
+        )
+        for index, (name, data_type) in enumerate(
+            (
+                ("PCG_POS", "VARCHAR"),
+                ("STATUS_O_TIME", "VARCHAR"),
+                ("TM_TIMESTAMP", "VARCHAR"),
+                ("PCG_INT_ID", "NUMBER"),
+            ),
+            start=1,
+        )
+    ]
+    state.profiles = [route_service, route_content, *utilization_profiles]
+    state.proof_by_object = {
+        route_object: [route_content],
+        target_object: [utilization_profiles[-1]],
+    }
+
+    collector.phase_extract_service_seed_ids(FakeCursor(), state)
+
+    command_log = (state.run_dir / "command_log.sql").read_text()
+    assert target_object not in command_log
+    assert '"PCG_POS" = %s' not in command_log
+    assert '"STATUS_O_TIME" = %s' not in command_log
+    assert '"TM_TIMESTAMP" = %s' not in command_log
+    assert (
+        f'FROM "PROD_ACCESS_DB"."INCA_SRC"."{route_object}" WHERE "SERVICE_ID" = %s' in command_log
+    )
+
+
 def test_resume_mode_refuses_unsafe_resume_without_checkpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "run-test"
     run_dir.mkdir()
