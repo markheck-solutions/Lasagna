@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import csv
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 
 from lasagna.snowflake.inca_src_discovery import (
@@ -38,11 +46,106 @@ from lasagna.snowflake.inca_src_discovery import (
     view_metadata_gap_rows,
 )
 
+_COLLECTOR_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "work_pc" / "collect_inca_src_evidence.py"
+)
+_COLLECTOR_SPEC = importlib.util.spec_from_file_location(
+    "inca_src_collector_under_test", _COLLECTOR_PATH
+)
+assert _COLLECTOR_SPEC is not None
+assert _COLLECTOR_SPEC.loader is not None
+collector: Any = importlib.util.module_from_spec(_COLLECTOR_SPEC)
+sys.modules[_COLLECTOR_SPEC.name] = collector
+_COLLECTOR_SPEC.loader.exec_module(collector)
+
 SEARCHABLE = Searchability(
     searchable_status="SEARCHABLE",
     exact_predicate_supported=True,
     count_query_status=PASS,
 )
+
+
+class FakeCursor:
+    def __init__(self) -> None:
+        self.description: list[tuple[str]] = []
+        self._rows: list[tuple[object, ...]] = []
+        self.sfqid = ""
+        self.calls: list[str] = []
+
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append(sql)
+        self.sfqid = f"Q{len(self.calls)}"
+        upper = sql.upper()
+        if "CURRENT_ACCOUNT" in upper:
+            self.description = [("CURRENT_ACCOUNT()",)]
+            self._rows = [("ACCT",)]
+        elif "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(0,)]
+        elif "INFORMATION_SCHEMA.TABLES" in upper:
+            self.description = [
+                ("TABLE_CATALOG",),
+                ("TABLE_SCHEMA",),
+                ("TABLE_NAME",),
+                ("TABLE_TYPE",),
+            ]
+            self._rows = [("PROD_ACCESS_DB", "INCA_SRC", "T_REL", "BASE TABLE")]
+        elif "INFORMATION_SCHEMA.COLUMNS" in upper and "TABLE_NAME = 'VIEWS'" in upper:
+            self.description = [("COLUMN_NAME",)]
+            self._rows = [("TABLE_CATALOG",), ("TABLE_SCHEMA",), ("TABLE_NAME",), ("IS_SECURE",)]
+        elif "INFORMATION_SCHEMA.COLUMNS" in upper:
+            self.description = [
+                ("TABLE_CATALOG",),
+                ("TABLE_SCHEMA",),
+                ("TABLE_NAME",),
+                ("COLUMN_NAME",),
+                ("ORDINAL_POSITION",),
+                ("DATA_TYPE",),
+                ("NUMERIC_SCALE",),
+                ("IS_NULLABLE",),
+            ]
+            self._rows = [
+                ("PROD_ACCESS_DB", "INCA_SRC", "T_REL", "CONTENT_INT_ID", 1, "NUMBER", 0, "YES")
+            ]
+        elif "INFORMATION_SCHEMA.VIEWS" in upper:
+            self.description = [
+                ("TABLE_CATALOG",),
+                ("TABLE_SCHEMA",),
+                ("TABLE_NAME",),
+                ("IS_SECURE",),
+            ]
+            self._rows = []
+        elif "OBJECT_DEPENDENCIES" in upper:
+            self.description = [("REFERENCING_DATABASE",)]
+            self._rows = []
+        elif "SELECT 1" in upper:
+            self.description = [("ONE",)]
+            self._rows = [(1,)]
+        else:
+            self.description = []
+            self._rows = []
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
+
+
+def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) -> SimpleNamespace:
+    return SimpleNamespace(
+        service_id="IC-388612",
+        database="PROD_ACCESS_DB",
+        schema="INCA_SRC",
+        connection="fake",
+        output_root=tmp_path,
+        query_tag="test",
+        page_size=100,
+        max_pages_per_predicate=25,
+        phase=phase,
+        internal_deadline_seconds=deadline,
+        statement_timeout_seconds=120,
+        run_dir=tmp_path / "run-test",
+        resume=False,
+        start_fresh=False,
+    )
 
 
 def column(name: str, data_type: str = "NUMBER", scale: int | None = 0) -> ColumnProfile:
@@ -96,6 +199,199 @@ def test_optional_view_metadata_column_absence_records_gap_not_route_evidence() 
     assert is_secure_gap[0]["causes_incomplete"] is False
     assert "node_key" not in is_secure_gap[0]
     assert "edge_hash" not in is_secure_gap[0]
+
+
+def test_run_manifest_json_is_written_before_first_snowflake_query(tmp_path: Path) -> None:
+    args = collector_args(tmp_path)
+    state = collector.initialize_run(args)
+
+    collector.phase_initialize_run(FakeCursor(), args, state)
+
+    assert (state.run_dir / "run_manifest.json").exists()
+    assert json.loads((state.run_dir / "run_manifest.json").read_text())["artifact_first"] is True
+
+
+def test_status_split_json_is_written_before_first_snowflake_query(tmp_path: Path) -> None:
+    args = collector_args(tmp_path)
+    state = collector.initialize_run(args)
+
+    collector.phase_initialize_run(FakeCursor(), args, state)
+
+    assert (state.run_dir / "status_split.json").exists()
+    assert (
+        "Sorter implementation change"
+        in json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    )
+
+
+def test_metadata_gaps_csv_is_written_even_when_empty(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+
+    rows = list(csv.DictReader((state.run_dir / "metadata_gaps.csv").open()))
+
+    assert rows == []
+    assert "metadata_object" in (state.run_dir / "metadata_gaps.csv").read_text()
+
+
+def test_graph_closure_summary_initialized_false(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+    payload = json.loads((state.run_dir / "graph_closure_summary.json").read_text())
+
+    assert payload["fixed_point_reached"] is False
+    assert payload["incomplete_area_count"] == 0
+
+
+def test_timeout_during_schema_discovery_leaves_valid_partial_artifacts(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, deadline=0)
+    state = collector.initialize_run(args)
+
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.run_phase(
+            state,
+            "discover_schema_objects",
+            lambda: collector.phase_discover_schema_objects(FakeCursor(), state),
+        )
+    collector.mark_incomplete_after_exception(state, "timeout", TimeoutError("deadline"))
+
+    assert (state.run_dir / "run_manifest.json").exists()
+    assert (state.run_dir / "status_split.json").exists()
+    assert (
+        json.loads((state.run_dir / "status_split.json").read_text())["statuses"][
+            "TM client-line relation proof"
+        ]["status"]
+        == INCOMPLETE
+    )
+
+
+def test_timeout_during_exact_id_scan_leaves_coverage_and_marks_incomplete(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, deadline=0)
+    state = collector.initialize_run(args)
+
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.run_phase(
+            state,
+            "run_exact_id_overlap_scan",
+            lambda: collector.check_deadline(state, "run_exact_id_overlap_scan", "test"),
+        )
+    collector.mark_incomplete_after_exception(state, "timeout", TimeoutError("deadline"))
+
+    assert (state.run_dir / "coverage_matrix.csv").exists()
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    assert statuses["Exact-ID overlap scan"]["status"] == INCOMPLETE
+    assert statuses["Evidence graph closure"]["status"] == INCOMPLETE
+
+
+def test_external_interruption_after_initialization_does_not_leave_only_command_log(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+
+    names = {path.name for path in state.run_dir.iterdir()}
+
+    assert "command_log.sql" in names
+    assert {"run_manifest.json", "status_split.json", "coverage_matrix.csv"} <= names
+    assert names != {"command_log.sql"}
+
+
+def test_internal_deadline_expires_before_bridge_timeout_and_writes_incomplete(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, deadline=0)
+    state = collector.initialize_run(args)
+
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.check_deadline(state, "run_exact_id_overlap_scan", "before bridge timeout")
+
+    collector.mark_incomplete_after_exception(state, "deadline", TimeoutError("internal"))
+    assert json.loads((state.run_dir / "run_manifest.json").read_text())["run_status"] == INCOMPLETE
+
+
+def test_query_log_records_phase_logical_sql_hash_timestamps_and_status(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+
+    collector.execute_observed_rows(
+        state, FakeCursor(), "SELECT 1", (), "initialize_run", "smoke_select"
+    )
+
+    rows = list(csv.DictReader((state.run_dir / "query_log.csv").open()))
+    assert rows[-1]["phase"] == "initialize_run"
+    assert rows[-1]["logical_query_name"] == "smoke_select"
+    assert rows[-1]["sql_hash"]
+    assert rows[-1]["started_at"]
+    assert rows[-1]["completed_at"]
+    assert rows[-1]["status"] == PASS
+
+
+def test_metadata_only_mode_does_not_run_exact_id_scan_or_graph_closure(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="metadata-only")
+    state = collector.initialize_run(args)
+    cursor = FakeCursor()
+
+    collector.phase_initialize_run(cursor, args, state)
+    collector.phase_discover_schema_objects(cursor, state)
+    collector.phase_discover_schema_columns(cursor, state)
+    collector.phase_discover_views_metadata(cursor, state)
+    collector.phase_discover_dependencies_optional(cursor, state)
+    collector.phase_write_schema_profile(state)
+    collector.phase_build_structured_id_dictionary(state)
+    collector.phase_write_final_status(state)
+
+    query_log = (state.run_dir / "query_log.csv").read_text()
+    assert "exact_count" not in query_log
+    assert (
+        json.loads((state.run_dir / "graph_closure_summary.json").read_text())[
+            "fixed_point_reached"
+        ]
+        is False
+    )
+
+
+def test_seed_only_mode_does_not_run_graph_closure(tmp_path: Path) -> None:
+    args = collector_args(tmp_path, phase="seed-only")
+    state = collector.initialize_run(args)
+    state.profiles = [column("CONTENT_INT_ID")]
+    state.proof_by_object = {"RELATION_TABLE": [column("CONTENT_INT_ID")]}
+
+    collector.phase_extract_service_seed_ids(FakeCursor(), state)
+    collector.phase_write_final_status(state)
+
+    query_log = (state.run_dir / "query_log.csv").read_text()
+    assert "run_graph_closure" not in query_log
+    assert (
+        json.loads((state.run_dir / "graph_closure_summary.json").read_text())[
+            "fixed_point_reached"
+        ]
+        is False
+    )
+
+
+def test_resume_mode_refuses_unsafe_resume_without_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-test"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
+    args = collector_args(tmp_path)
+    args.resume = True
+
+    with pytest.raises(RuntimeError, match="checkpoint.json"):
+        collector.initialize_run(args)
+
+
+def test_negative_evidence_not_allowed_after_timeout_incomplete(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+    collector.mark_incomplete_after_exception(state, "timeout", TimeoutError("internal"))
+
+    payload = json.loads((state.run_dir / "graph_closure_summary.json").read_text())
+    assert payload["fixed_point_reached"] is False
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    assert statuses["Negative evidence ledger"]["status"] == INCOMPLETE
 
 
 def test_manifest_and_current_sql_are_seed_sources_not_boundaries() -> None:
