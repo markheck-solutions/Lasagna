@@ -15,6 +15,7 @@ from lasagna.snowflake.inca_src_discovery import (
     SemanticRegistryRow,
     assert_full_inventory_before_candidate_classification,
     build_structured_id_dictionary_rows,
+    build_views_metadata_query,
     classify_candidate_relation_tables,
     classify_structured_id_column,
     close_evidence_graph,
@@ -34,6 +35,7 @@ from lasagna.snowflake.inca_src_discovery import (
     schema_drift_report,
     status_split_template,
     tx_waveinfo_registry_row,
+    view_metadata_gap_rows,
 )
 
 SEARCHABLE = Searchability(
@@ -66,6 +68,34 @@ def test_full_schema_discovery_runs_before_candidate_classification() -> None:
             object_inventory_complete=True,
             column_inventory_complete=False,
         )
+
+
+def test_views_metadata_query_uses_is_secure_not_invalid_secure() -> None:
+    sql = build_views_metadata_query(
+        "PROD_ACCESS_DB",
+        "INCA_SRC",
+        [
+            "TABLE_CATALOG",
+            "TABLE_SCHEMA",
+            "TABLE_NAME",
+            "IS_SECURE",
+            "CREATED",
+        ],
+    )
+
+    assert "IS_SECURE" in sql
+    assert " SECURE" not in sql.replace("IS_SECURE", "")
+
+
+def test_optional_view_metadata_column_absence_records_gap_not_route_evidence() -> None:
+    gaps = view_metadata_gap_rows(["TABLE_CATALOG", "TABLE_SCHEMA", "TABLE_NAME"])
+    is_secure_gap = [gap for gap in gaps if gap["missing_column"] == "IS_SECURE"]
+
+    assert is_secure_gap
+    assert is_secure_gap[0]["gap_scope"] == "OPTIONAL_METADATA_COLUMN"
+    assert is_secure_gap[0]["causes_incomplete"] is False
+    assert "node_key" not in is_secure_gap[0]
+    assert "edge_hash" not in is_secure_gap[0]
 
 
 def test_manifest_and_current_sql_are_seed_sources_not_boundaries() -> None:

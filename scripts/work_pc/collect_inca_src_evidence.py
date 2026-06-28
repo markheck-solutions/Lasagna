@@ -775,7 +775,15 @@ def write_artifacts(
     dictionary_rows = build_structured_id_dictionary_rows(config.run_id, profiles)
     candidates = candidate_rows(config, proof_by_object)
     registry_rows = registry_csv_rows(graph_scan.evidence_rows)
-    statuses = status_payload(config, seed_scan, graph_scan, closure, candidates, registry_rows)
+    statuses = status_payload(
+        config,
+        metadata,
+        seed_scan,
+        graph_scan,
+        closure,
+        candidates,
+        registry_rows,
+    )
     hashes = run_hashes(objects, columns, dictionary_rows, graph_scan.coverage_rows, registry_rows)
     write_core_artifacts(run_dir, config, metadata, dictionary_rows, candidates, proof_by_object)
     write_graph_artifacts(
@@ -809,6 +817,7 @@ def write_core_artifacts(
     objects = metadata.get("tables", [])
     columns = metadata.get("columns", [])
     dependencies = metadata.get("dependencies", [])
+    metadata_gaps = metadata.get("metadata_gaps", [])
     write_json_artifact(
         run_dir / "run_manifest.json", run_manifest(config, metadata, dictionary_rows)
     )
@@ -816,6 +825,11 @@ def write_core_artifacts(
     write_csv_artifact(run_dir / "schema_columns.csv", csv_headers(columns), columns)
     write_csv_artifact(run_dir / "object_counts.csv", csv_headers(objects), objects)
     write_csv_artifact(run_dir / "dependencies.csv", csv_headers(dependencies), dependencies)
+    write_csv_artifact(
+        run_dir / "metadata_gaps.csv",
+        csv_headers(metadata_gaps),
+        metadata_gaps,
+    )
     write_csv_artifact(
         run_dir / "structured_id_dictionary.csv",
         STRUCTURED_ID_DICTIONARY_COLUMNS,
@@ -902,6 +916,7 @@ def run_manifest(
         "total_views_discovered": len(metadata.get("views", [])),
         "total_columns_discovered": len(metadata.get("columns", [])),
         "structured_id_column_count": sum(1 for row in dictionary_rows if row["id_domain"]),
+        "metadata_gap_count": len(metadata.get("metadata_gaps", [])),
     }
 
 
@@ -1028,6 +1043,7 @@ def join_paths_payload(evidence_rows: list[EvidenceRow]) -> dict[str, object]:
 
 def status_payload(
     config: LiveConfig,
+    metadata: dict[str, list[dict[str, object]]],
     seed_scan: SeedScanResult,
     graph_scan: GraphScanResult,
     closure: object,
@@ -1037,8 +1053,14 @@ def status_payload(
     closure_result = as_closure(closure)
     split = status_split_template(config.run_id)
     statuses = split["statuses"]
-    set_status(statuses, "INCA_SRC schema discovery", "PASS", "metadata queries completed", [])
-    set_status(statuses, "Schema/profile catalog", "PASS", "schema catalog artifacts written", [])
+    metadata_incomplete = metadata_has_incomplete_gap(metadata)
+    schema_status = "INCOMPLETE" if metadata_incomplete else "PASS"
+    set_status(
+        statuses, "INCA_SRC schema discovery", schema_status, "metadata queries completed", []
+    )
+    set_status(
+        statuses, "Schema/profile catalog", schema_status, "schema catalog artifacts written", []
+    )
     set_status(statuses, "Manifest-boundary avoidance", "PASS", "full metadata inventory used", [])
     set_status(
         statuses,
@@ -1111,6 +1133,13 @@ def status_payload(
     )
     set_status(statuses, "Repo validation", "NOT_RUN", "live collector run only", [])
     return split
+
+
+def metadata_has_incomplete_gap(metadata: dict[str, list[dict[str, object]]]) -> bool:
+    for row in metadata.get("metadata_gaps", []):
+        if str(row.get("causes_incomplete", "")).lower() == "true":
+            return True
+    return False
 
 
 def exact_overlap_status(graph_scan: GraphScanResult) -> str:

@@ -47,6 +47,26 @@ STATUS_NAMES = (
     "Repo validation",
 )
 
+VIEW_REQUIRED_COLUMNS = (
+    "TABLE_CATALOG",
+    "TABLE_SCHEMA",
+    "TABLE_NAME",
+)
+
+VIEW_OPTIONAL_COLUMNS = (
+    "TABLE_OWNER",
+    "VIEW_DEFINITION",
+    "CHECK_OPTION",
+    "IS_UPDATABLE",
+    "INSERTABLE_INTO",
+    "IS_SECURE",
+    "CREATED",
+    "LAST_ALTERED",
+    "LAST_DDL",
+    "LAST_DDL_BY",
+    "COMMENT",
+)
+
 STRUCTURED_ID_DICTIONARY_COLUMNS = (
     "run_id",
     "database",
@@ -445,12 +465,12 @@ def required_metadata_queries(
             f"WHERE TABLE_SCHEMA = {literal_schema} "
             "ORDER BY TABLE_NAME, ORDINAL_POSITION"
         ),
-        "views": (
-            "SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, SECURE, CHECK_OPTION, "
-            "IS_UPDATABLE, CREATED, LAST_ALTERED "
-            f"FROM {quoted_database}.INFORMATION_SCHEMA.VIEWS "
-            f"WHERE TABLE_SCHEMA = {literal_schema} "
-            "ORDER BY TABLE_NAME"
+        "views_available_columns": (
+            "SELECT COLUMN_NAME "
+            f"FROM {quoted_database}.INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = 'INFORMATION_SCHEMA' "
+            "AND TABLE_NAME = 'VIEWS' "
+            "ORDER BY ORDINAL_POSITION"
         ),
         "dependencies": (
             "SELECT REFERENCING_DATABASE, REFERENCING_SCHEMA, REFERENCING_OBJECT_NAME, "
@@ -463,6 +483,64 @@ def required_metadata_queries(
             f"AND REFERENCED_SCHEMA = {literal_schema})"
         ),
     }
+
+
+def build_views_metadata_query(
+    database: str,
+    schema: str,
+    available_columns: Iterable[str],
+) -> str:
+    normalized = {column.upper() for column in available_columns}
+    missing_required = [column for column in VIEW_REQUIRED_COLUMNS if column not in normalized]
+    if missing_required:
+        joined = ", ".join(missing_required)
+        msg = f"INFORMATION_SCHEMA.VIEWS missing required columns: {joined}"
+        raise RuntimeError(msg)
+    selected = [
+        column
+        for column in (*VIEW_REQUIRED_COLUMNS, *VIEW_OPTIONAL_COLUMNS)
+        if column in normalized
+    ]
+    return (
+        f"SELECT {', '.join(selected)} "
+        f"FROM {quote_identifier(database)}.INFORMATION_SCHEMA.VIEWS "
+        f"WHERE TABLE_SCHEMA = {sql_literal(schema)} "
+        "ORDER BY TABLE_NAME"
+    )
+
+
+def view_metadata_gap_rows(
+    available_columns: Iterable[str],
+    *,
+    discovery_status: str = PASS,
+    discovery_error: str = "",
+) -> list[dict[str, object]]:
+    normalized = {column.upper() for column in available_columns}
+    rows: list[dict[str, object]] = []
+    if discovery_status != PASS:
+        rows.append(
+            {
+                "metadata_object": "INFORMATION_SCHEMA.VIEWS",
+                "gap_scope": "COLUMN_DISCOVERY",
+                "missing_column": "",
+                "required": False,
+                "causes_incomplete": False,
+                "reason": discovery_error,
+            }
+        )
+    for column in VIEW_OPTIONAL_COLUMNS:
+        if column not in normalized:
+            rows.append(
+                {
+                    "metadata_object": "INFORMATION_SCHEMA.VIEWS",
+                    "gap_scope": "OPTIONAL_METADATA_COLUMN",
+                    "missing_column": column,
+                    "required": False,
+                    "causes_incomplete": False,
+                    "reason": "optional metadata column unavailable",
+                }
+            )
+    return rows
 
 
 def quote_identifier(identifier: str) -> str:
@@ -1297,6 +1375,16 @@ def execute_metadata_queries(
         try:
             _columns, rows = execute_metadata_query(cursor, sql_text)
         except Exception as exc:
+            if name == "views_available_columns":
+                outputs["metadata_gaps"] = view_metadata_gap_rows(
+                    VIEW_REQUIRED_COLUMNS,
+                    discovery_status=INCOMPLETE,
+                    discovery_error=str(exc),
+                )
+                outputs["views_available_columns"] = [
+                    {"COLUMN_NAME": column} for column in VIEW_REQUIRED_COLUMNS
+                ]
+                continue
             if name != "dependencies":
                 raise
             outputs[name] = [
@@ -1307,6 +1395,31 @@ def execute_metadata_queries(
             ]
         else:
             outputs[name] = rows
+    view_columns = [
+        str(row["COLUMN_NAME"])
+        for row in outputs.get("views_available_columns", [])
+        if "COLUMN_NAME" in row
+    ]
+    outputs.setdefault("metadata_gaps", []).extend(view_metadata_gap_rows(view_columns))
+    try:
+        _columns, rows = execute_metadata_query(
+            cursor,
+            build_views_metadata_query(database, schema, view_columns),
+        )
+    except Exception as exc:
+        outputs.setdefault("metadata_gaps", []).append(
+            {
+                "metadata_object": "INFORMATION_SCHEMA.VIEWS",
+                "gap_scope": "VIEW_METADATA_QUERY",
+                "missing_column": "",
+                "required": True,
+                "causes_incomplete": True,
+                "reason": str(exc),
+            }
+        )
+        outputs["views"] = []
+    else:
+        outputs["views"] = rows
     return outputs
 
 
