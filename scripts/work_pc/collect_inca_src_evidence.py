@@ -940,16 +940,41 @@ def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception
 
 
 def mark_statuses_incomplete(state: RunState, reason: str) -> None:
+    state.status_split = status_payload_for_state(state)
     statuses = state.status_split["statuses"]
+    phase = str(state.run_manifest.get("current_phase", "unknown"))
+    for name in status_names_for_incomplete_phase(phase):
+        set_status(statuses, name, INCOMPLETE, reason, [])
     for name in (
         "Exact-ID overlap scan",
         "Evidence graph closure",
+        "Candidate relation scan",
+        "Edge semantics registry",
         "TM client-line relation proof",
         "Negative evidence ledger",
         "IC-388612 route order proof",
     ):
         set_status(statuses, name, INCOMPLETE, reason, [])
     set_status(statuses, "Sorter implementation change", "NOT_STARTED", "out of scope", [])
+
+
+def status_names_for_incomplete_phase(phase: str) -> tuple[str, ...]:
+    return {
+        "initialize_run": ("INCA_SRC schema discovery",),
+        "discover_schema_objects": ("INCA_SRC schema discovery",),
+        "discover_schema_columns": ("INCA_SRC schema discovery",),
+        "discover_views_metadata": ("INCA_SRC schema discovery",),
+        "discover_dependencies_optional": ("Schema/profile catalog",),
+        "write_schema_profile": ("Schema/profile catalog",),
+        "build_structured_id_dictionary": (
+            "Manifest-boundary avoidance",
+            "Structured ID dictionary",
+        ),
+        "extract_service_seed_ids": ("IC-388612 ID extraction",),
+        "run_exact_id_overlap_scan": ("Exact-ID overlap scan", "Candidate relation scan"),
+        "run_graph_closure": ("Evidence graph closure",),
+        "write_final_status": ("Schema drift invalidation",),
+    }.get(phase, ())
 
 
 def refresh_run_manifest_counts(state: RunState) -> None:

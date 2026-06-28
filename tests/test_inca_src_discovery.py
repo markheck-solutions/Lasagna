@@ -320,6 +320,110 @@ def test_timeout_during_schema_discovery_leaves_valid_partial_artifacts(
     )
 
 
+def test_status_split_preserves_passed_metadata_on_exception(tmp_path: Path) -> None:
+    args = collector_args(tmp_path)
+    write_snapshot_docs(args.repo_root)
+    state = collector.initialize_run(args)
+    cursor = FakeCursor()
+
+    collector.run_phase(
+        state, "initialize_run", lambda: collector.phase_initialize_run(cursor, args, state)
+    )
+    collector.run_phase(
+        state,
+        "discover_schema_objects",
+        lambda: collector.phase_discover_schema_objects(cursor, state),
+    )
+    collector.run_phase(
+        state,
+        "discover_schema_columns",
+        lambda: collector.phase_discover_schema_columns(cursor, state),
+    )
+    collector.run_phase(
+        state,
+        "discover_views_metadata",
+        lambda: collector.phase_discover_views_metadata(cursor, state),
+    )
+    collector.run_phase(
+        state,
+        "discover_dependencies_optional",
+        lambda: collector.phase_discover_dependencies_optional(cursor, state),
+    )
+    collector.run_phase(
+        state, "write_schema_profile", lambda: collector.phase_write_schema_profile(state)
+    )
+    collector.run_phase(
+        state,
+        "build_structured_id_dictionary",
+        lambda: collector.phase_build_structured_id_dictionary(state),
+    )
+
+    state.deadline_started_monotonic = 0
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.run_phase(
+            state,
+            "extract_service_seed_ids",
+            lambda: collector.phase_extract_service_seed_ids(cursor, state),
+        )
+    collector.mark_incomplete_after_exception(state, "deadline", TimeoutError("internal"))
+
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    assert statuses["INCA_SRC schema discovery"]["status"] == PASS
+    assert statuses["Schema/profile catalog"]["status"] == PASS
+    assert statuses["Manifest-boundary avoidance"]["status"] == PASS
+    assert statuses["Structured ID dictionary"]["status"] == PASS
+    assert statuses["IC-388612 ID extraction"]["status"] == INCOMPLETE
+    assert statuses["TM client-line relation proof"]["status"] == INCOMPLETE
+
+
+def test_phase_log_and_status_split_agree_for_completed_metadata_after_timeout(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path)
+    write_snapshot_docs(args.repo_root)
+    state = collector.initialize_run(args)
+    cursor = FakeCursor()
+
+    collector.run_phase(
+        state, "initialize_run", lambda: collector.phase_initialize_run(cursor, args, state)
+    )
+    collector.run_phase(
+        state,
+        "discover_schema_objects",
+        lambda: collector.phase_discover_schema_objects(cursor, state),
+    )
+    collector.run_phase(
+        state,
+        "discover_schema_columns",
+        lambda: collector.phase_discover_schema_columns(cursor, state),
+    )
+    collector.run_phase(
+        state, "write_schema_profile", lambda: collector.phase_write_schema_profile(state)
+    )
+    state.deadline_started_monotonic = 0
+
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.run_phase(
+            state,
+            "extract_service_seed_ids",
+            lambda: collector.check_deadline(state, "extract_service_seed_ids", "seed scan"),
+        )
+    collector.mark_incomplete_after_exception(state, "deadline", TimeoutError("internal"))
+
+    phase_rows = list(csv.DictReader((state.run_dir / "phase_log.csv").open()))
+    passed_phases = {row["phase"] for row in phase_rows if row["status"] == PASS}
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+
+    assert {
+        "discover_schema_objects",
+        "discover_schema_columns",
+        "write_schema_profile",
+    } <= passed_phases
+    assert statuses["INCA_SRC schema discovery"]["status"] == PASS
+    assert statuses["Schema/profile catalog"]["status"] == PASS
+    assert statuses["IC-388612 ID extraction"]["status"] == INCOMPLETE
+
+
 def test_timeout_during_exact_id_scan_leaves_coverage_and_marks_incomplete(
     tmp_path: Path,
 ) -> None:
