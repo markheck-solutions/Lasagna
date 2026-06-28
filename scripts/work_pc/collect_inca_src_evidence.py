@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import subprocess
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -64,6 +66,22 @@ from lasagna.snowflake.inca_src_discovery import (
 DEFAULT_OUTPUT_ROOT = Path.home() / "Desktop" / "LasagnaRouteReviews" / "inca-src-discovery"
 DEFAULT_INTERNAL_DEADLINE_SECONDS = 1500
 DEFAULT_STATEMENT_TIMEOUT_SECONDS = 120
+ARTIFACT_SCHEMA_VERSION = "inca-src-evidence-v1"
+DEFAULT_REPO_ROOT = Path(r"C:\repos\Lasagna")
+DOC_SNAPSHOT_FILES = {
+    "FRAMEWORK_RUNBOOK_SNAPSHOT.md": "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md",
+    "STATUS_CONTRACT_SNAPSHOT.md": "docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md",
+    "AI_HANDOFF_SNAPSHOT.md": "docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md",
+}
+HARD_CONSTRAINTS = {
+    "rag_proof_allowed": False,
+    "embedding_ranked_proof_allowed": False,
+    "context_only_field_proof_allowed": False,
+    "sorter_changes_allowed": False,
+    "port_match_rule_changes_allowed": False,
+    "edge_semantics_self_approval_allowed": False,
+    "negative_evidence_requires_full_fixed_point": True,
+}
 PHASES = (
     "initialize_run",
     "discover_schema_objects",
@@ -121,6 +139,8 @@ class LiveConfig:
     phase_mode: str
     internal_deadline_seconds: int
     statement_timeout_seconds: int
+    framework_commit_sha: str
+    repo_root: Path
 
 
 @dataclass(frozen=True)
@@ -203,6 +223,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_STATEMENT_TIMEOUT_SECONDS,
     )
     parser.add_argument("--run-dir", type=Path, default=None)
+    parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
+    parser.add_argument(
+        "--framework-commit",
+        default=os.environ.get("LASAGNA_FRAMEWORK_COMMIT", ""),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--start-fresh", action="store_true")
     return parser.parse_args()
@@ -251,6 +276,8 @@ def initialize_run(args: argparse.Namespace) -> RunState:
         phase_mode=args.phase,
         internal_deadline_seconds=args.internal_deadline_seconds,
         statement_timeout_seconds=args.statement_timeout_seconds,
+        framework_commit_sha=resolve_framework_commit(args.repo_root, args.framework_commit),
+        repo_root=Path(args.repo_root),
     )
     state = RunState(
         run_dir=run_dir,
@@ -298,6 +325,18 @@ def initial_run_manifest(config: LiveConfig, run_dir: Path) -> dict[str, object]
         "service_id": config.service_id,
         "database": config.database,
         "schema": config.schema,
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "framework_commit_sha": config.framework_commit_sha,
+        "runbook_path": str(config.repo_root / DOC_SNAPSHOT_FILES["FRAMEWORK_RUNBOOK_SNAPSHOT.md"]),
+        "status_contract_path": str(
+            config.repo_root / DOC_SNAPSHOT_FILES["STATUS_CONTRACT_SNAPSHOT.md"]
+        ),
+        "handoff_path": str(config.repo_root / DOC_SNAPSHOT_FILES["AI_HANDOFF_SNAPSHOT.md"]),
+        "documentation_snapshots": list(DOC_SNAPSHOT_FILES),
+        "hard_constraints": HARD_CONSTRAINTS,
+        "negative_evidence_allowed": False,
+        "sorter_changes_allowed": False,
+        "port_match_rule_changes_allowed": False,
         "phase_mode": config.phase_mode,
         "run_dir": str(run_dir),
         "started_at": utc_now(),
@@ -340,6 +379,7 @@ def write_baseline_artifacts(state: RunState) -> None:
             ),
         )
         write_command_log(state.run_dir, state.config.database, state.config.schema)
+        write_documentation_snapshots(state)
         write_checkpoint(state, "initialize_run")
     except Exception as exc:
         (state.run_dir / "init_error.txt").write_text(str(exc), encoding="utf-8")
@@ -350,6 +390,56 @@ def write_init_error(output_root: Path, exc: Exception) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     path = output_root / "init_error.txt"
     path.write_text(f"{utc_now()}\n{type(exc).__name__}: {exc}\n", encoding="utf-8")
+
+
+def resolve_framework_commit(repo_root: Path, provided_commit: str) -> str:
+    if provided_commit:
+        return provided_commit
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip()
+
+
+def write_documentation_snapshots(state: RunState) -> None:
+    snapshot_status: dict[str, str] = {}
+    for snapshot_name, relative_path in DOC_SNAPSHOT_FILES.items():
+        content = read_doc_snapshot_source(
+            state.config.repo_root, state.config.framework_commit_sha, relative_path
+        )
+        if content:
+            snapshot_status[snapshot_name] = "WRITTEN"
+            (state.run_dir / snapshot_name).write_text(content, encoding="utf-8")
+        else:
+            snapshot_status[snapshot_name] = "UNAVAILABLE"
+    state.run_manifest["documentation_snapshot_status"] = snapshot_status
+    write_json_artifact(state.run_dir / "run_manifest.json", state.run_manifest)
+
+
+def read_doc_snapshot_source(repo_root: Path, commit_sha: str, relative_path: str) -> str:
+    file_path = repo_root / relative_path
+    if file_path.exists():
+        return file_path.read_text(encoding="utf-8")
+    if not commit_sha:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "show", f"{commit_sha}:{relative_path}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    return result.stdout
 
 
 def run_collector_phases(args: argparse.Namespace, state: RunState) -> RunState:
@@ -716,6 +806,7 @@ def phase_write_final_status(state: RunState) -> None:
     write_json_artifact(state.run_dir / "golden_blocker_results.json", {"status": INCOMPLETE})
     if should_write_negative_ledger(state):
         write_negative_ledger(state, hashes, statuses)
+    state.run_manifest["negative_evidence_allowed"] = should_write_negative_ledger(state)
     state.run_manifest["run_status"] = PASS if state.config.phase_mode != "full" else INCOMPLETE
     state.run_manifest["completed_at"] = utc_now()
     refresh_run_manifest_counts(state)
@@ -818,6 +909,7 @@ def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception
     state.run_manifest["run_status"] = INCOMPLETE
     state.run_manifest["completed_at"] = utc_now()
     state.run_manifest["incomplete_reason"] = f"{reason}: {exc}"
+    state.run_manifest["negative_evidence_allowed"] = False
     write_json_artifact(state.run_dir / "run_manifest.json", state.run_manifest)
     write_json_artifact(state.run_dir / "status_split.json", state.status_split)
     write_checkpoint(state, phase, reason=f"{reason}: {exc}")

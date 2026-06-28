@@ -143,9 +143,30 @@ def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) ->
         internal_deadline_seconds=deadline,
         statement_timeout_seconds=120,
         run_dir=tmp_path / "run-test",
+        repo_root=tmp_path / "repo",
+        framework_commit="TEST_COMMIT",
         resume=False,
         start_fresh=False,
     )
+
+
+class FailingTablesCursor(FakeCursor):
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        if "INFORMATION_SCHEMA.TABLES" in sql.upper():
+            raise RuntimeError("tables inventory blocked")
+        super().execute(sql, params)
+
+
+def write_snapshot_docs(repo_root: Path) -> None:
+    docs = {
+        "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md": "runbook snapshot",
+        "docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md": "status contract snapshot",
+        "docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md": "handoff snapshot",
+    }
+    for relative_path, content in docs.items():
+        path = repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
 
 
 def column(name: str, data_type: str = "NUMBER", scale: int | None = 0) -> ColumnProfile:
@@ -203,12 +224,46 @@ def test_optional_view_metadata_column_absence_records_gap_not_route_evidence() 
 
 def test_run_manifest_json_is_written_before_first_snowflake_query(tmp_path: Path) -> None:
     args = collector_args(tmp_path)
+    write_snapshot_docs(args.repo_root)
     state = collector.initialize_run(args)
 
     collector.phase_initialize_run(FakeCursor(), args, state)
 
     assert (state.run_dir / "run_manifest.json").exists()
     assert json.loads((state.run_dir / "run_manifest.json").read_text())["artifact_first"] is True
+
+
+def test_run_manifest_includes_framework_commit_schema_contracts_and_constraints(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="metadata-only")
+    write_snapshot_docs(args.repo_root)
+
+    state = collector.initialize_run(args)
+    manifest = json.loads((state.run_dir / "run_manifest.json").read_text())
+
+    assert manifest["framework_commit_sha"] == "TEST_COMMIT"
+    assert manifest["artifact_schema_version"] == "inca-src-evidence-v1"
+    assert manifest["phase_mode"] == "metadata-only"
+    assert manifest["hard_constraints"]["sorter_changes_allowed"] is False
+    assert manifest["hard_constraints"]["port_match_rule_changes_allowed"] is False
+    assert manifest["negative_evidence_allowed"] is False
+    assert manifest["runbook_path"].endswith("docs\\runbooks\\INCA_SRC_EVIDENCE_FRAMEWORK.md")
+    assert manifest["status_contract_path"].endswith(
+        "docs\\contracts\\INCA_SRC_EVIDENCE_STATUS_CONTRACT.md"
+    )
+    assert manifest["handoff_path"].endswith("docs\\ai_handoffs\\INCA_SRC_EVIDENCE_HANDOFF.md")
+
+
+def test_run_folder_includes_framework_status_and_handoff_snapshots(tmp_path: Path) -> None:
+    args = collector_args(tmp_path)
+    write_snapshot_docs(args.repo_root)
+
+    state = collector.initialize_run(args)
+
+    assert (state.run_dir / "FRAMEWORK_RUNBOOK_SNAPSHOT.md").read_text() == "runbook snapshot"
+    assert (state.run_dir / "STATUS_CONTRACT_SNAPSHOT.md").read_text() == "status contract snapshot"
+    assert (state.run_dir / "AI_HANDOFF_SNAPSHOT.md").read_text() == "handoff snapshot"
 
 
 def test_status_split_json_is_written_before_first_snowflake_query(tmp_path: Path) -> None:
@@ -332,6 +387,7 @@ def test_metadata_only_mode_does_not_run_exact_id_scan_or_graph_closure(
     tmp_path: Path,
 ) -> None:
     args = collector_args(tmp_path, phase="metadata-only")
+    write_snapshot_docs(args.repo_root)
     state = collector.initialize_run(args)
     cursor = FakeCursor()
 
@@ -394,6 +450,31 @@ def test_negative_evidence_not_allowed_after_timeout_incomplete(tmp_path: Path) 
     statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
     assert statuses["Negative evidence ledger"]["status"] == INCOMPLETE
     assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
+
+
+def test_negative_evidence_written_only_after_full_fixed_point_without_incomplete(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="full")
+    write_snapshot_docs(args.repo_root)
+    state = collector.initialize_run(args)
+    state.closure = GraphClosureResult(True, 1, 1, 1, 0, 0, (0,), (0,), 0, (), 0, 0, 0)
+
+    collector.phase_write_final_status(state)
+
+    ledger_path = state.run_dir / "negative_evidence_ledger_entry.json"
+    assert ledger_path.exists()
+    ledger = json.loads(ledger_path.read_text())
+    assert ledger["negative_evidence_allowed"] is True
+
+
+def test_core_tables_inventory_failure_remains_fail_closed(tmp_path: Path) -> None:
+    args = collector_args(tmp_path)
+    write_snapshot_docs(args.repo_root)
+    state = collector.initialize_run(args)
+
+    with pytest.raises(RuntimeError, match="tables inventory blocked"):
+        collector.phase_discover_schema_objects(FailingTablesCursor(), state)
 
 
 def test_manifest_and_current_sql_are_seed_sources_not_boundaries() -> None:
