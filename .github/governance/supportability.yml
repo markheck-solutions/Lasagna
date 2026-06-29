@@ -1,0 +1,262 @@
+standard:
+  name: supportability-standard
+  source: docs/reference/supportability-standard.md
+  hash: "942e00289824f59c4906978025b61f5782f2a29a3efa9415952eee657fede73a"
+
+required_gates:
+  lint:
+    - python scripts/quality_gates/check_lasagna_supportability.py lint .
+  format_check:
+    - python scripts/quality_gates/check_lasagna_supportability.py format .
+  typecheck:
+    - python scripts/quality_gates/check_lasagna_supportability.py typecheck .
+  complexity:
+    - python scripts/quality_gates/check_lasagna_supportability.py complexity .
+  architecture:
+    - python scripts/quality_gates/check_lasagna_supportability.py architecture .
+  tests:
+    - python scripts/quality_gates/check_lasagna_supportability.py tests .
+  compile_or_build:
+    - python scripts/quality_gates/check_lasagna_supportability.py compile .
+  package_audit: []
+  sql_supportability:
+    - python scripts/quality_gates/check_lasagna_supportability.py sql .
+
+coverage:
+  changed_files: required
+  high_risk_files: required
+  forbid_gate_scope_narrowing: true
+  forbid_threshold_weakening: true
+
+ai_review:
+  copilot_required: true
+  latest_head_required: true
+  unresolved_p0_p1_p2_blocks: true
+  reviewer_login_patterns:
+    - "*copilot*"
+    - "chatgpt-codex-connector*"
+
+receipt:
+  artifact_name: supportability-delivery-receipt
+  retention_days: 90
+
+architecture_policy:
+  version: 1
+  enforcement_mode: block_all
+  governed_roots:
+    - path: .github
+      kind: ci_config
+      owner: lasagna
+      purpose: GitHub governance and workflow configuration
+    - path: assets
+      kind: generated_artifact
+      owner: lasagna
+      purpose: installer and application assets
+    - path: artifacts
+      kind: generated_artifact
+      owner: lasagna
+      purpose: generated supportability evidence
+    - path: docs
+      kind: docs
+      owner: lasagna
+      purpose: repository documentation and adopted standards
+    - path: INSTALL_LASAGNA.cmd
+      kind: ci_config
+      owner: lasagna
+      purpose: user installer entry point
+    - path: pyproject.toml
+      kind: ci_config
+      owner: lasagna
+      purpose: Python packaging and tool configuration
+    - path: requirements-dev.txt
+      kind: ci_config
+      owner: lasagna
+      purpose: development validation dependencies
+    - path: requirements-runtime.txt
+      kind: ci_config
+      owner: lasagna
+      purpose: runtime dependencies
+    - path: scripts
+      kind: production_python
+      owner: lasagna
+      purpose: repository quality gates and automation
+    - path: src
+      kind: production_python
+      owner: lasagna
+      purpose: Lasagna application source
+    - path: tests
+      kind: test_python
+      owner: lasagna
+      purpose: Lasagna behavior and supportability tests
+    - path: UNINSTALL_LASAGNA.cmd
+      kind: ci_config
+      owner: lasagna
+      purpose: user uninstaller entry point
+  runtime_relevance:
+    production_globs:
+      - "**/*.py"
+      - "**/*.ps1"
+      - "**/*.sh"
+      - "**/*.sql"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.cmd"
+      - "pyproject.toml"
+      - "requirements*.txt"
+    non_runtime_globs:
+      - "assets/**"
+      - "artifacts/**"
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.json"
+  vague_names:
+    forbidden:
+      - utils
+      - helpers
+      - common
+      - misc
+      - stuff
+      - shared
+  modules:
+    github:
+      path: .github
+      owner: lasagna
+      purpose: GitHub governance and workflow configuration
+      classification: ci
+      domain: github-enforcement
+      allowed_dependencies: []
+      forbidden_dependencies:
+        - src
+        - tests
+      test_strategy: reusable workflow canary and supportability receipt
+      limits:
+        max_file_lines: 500
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+    scripts:
+      path: scripts
+      owner: lasagna
+      purpose: repository quality gates and automation
+      classification: support_tool
+      domain: quality-gates
+      allowed_dependencies:
+        - src
+      forbidden_dependencies:
+        - tests
+      test_strategy: exercised by supportability-enforcement workflow
+      limits:
+        max_file_lines: 350
+        max_function_lines: 80
+        max_class_lines: 120
+        max_functions_per_file: 40
+        max_classes_per_file: 10
+    src:
+      path: src
+      owner: lasagna
+      purpose: Lasagna application source
+      classification: application
+      domain: route-workbook-generation
+      allowed_dependencies: []
+      forbidden_dependencies:
+        - tests
+      test_strategy: pytest coverage through tests/
+      limits:
+        max_file_lines: 700
+        max_function_lines: 120
+        max_class_lines: 240
+        max_functions_per_file: 45
+        max_classes_per_file: 12
+    tests:
+      path: tests
+      owner: lasagna
+      purpose: Lasagna behavior and supportability tests
+      classification: test
+      domain: route-workbook-generation
+      allowed_dependencies:
+        - src
+      forbidden_dependencies: []
+      test_strategy: pytest
+      limits:
+        max_file_lines: 2500
+        max_function_lines: 250
+        max_class_lines: 800
+        max_functions_per_file: 150
+        max_classes_per_file: 30
+    packaging:
+      path: pyproject.toml
+      owner: lasagna
+      purpose: Python packaging and tool configuration
+      classification: ci
+      domain: python-runtime-configuration
+      allowed_dependencies: []
+      forbidden_dependencies: []
+      test_strategy: package and validation commands
+      limits:
+        max_file_lines: 300
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+    requirements:
+      path: requirements-dev.txt
+      owner: lasagna
+      purpose: development validation dependencies
+      classification: ci
+      domain: python-runtime-configuration
+      allowed_dependencies: []
+      forbidden_dependencies: []
+      test_strategy: dependency install during quality checks
+      limits:
+        max_file_lines: 300
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+    runtime_requirements:
+      path: requirements-runtime.txt
+      owner: lasagna
+      purpose: runtime dependencies
+      classification: ci
+      domain: python-runtime-configuration
+      allowed_dependencies: []
+      forbidden_dependencies: []
+      test_strategy: dependency install during runtime use
+      limits:
+        max_file_lines: 300
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+    installer:
+      path: INSTALL_LASAGNA.cmd
+      owner: lasagna
+      purpose: user installer entry point
+      classification: ci
+      domain: local-installation
+      allowed_dependencies: []
+      forbidden_dependencies: []
+      test_strategy: installer script tests
+      limits:
+        max_file_lines: 300
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+    uninstaller:
+      path: UNINSTALL_LASAGNA.cmd
+      owner: lasagna
+      purpose: user uninstaller entry point
+      classification: ci
+      domain: local-installation
+      allowed_dependencies: []
+      forbidden_dependencies: []
+      test_strategy: installer script tests
+      limits:
+        max_file_lines: 300
+        max_function_lines: 0
+        max_class_lines: 0
+        max_functions_per_file: 0
+        max_classes_per_file: 0
+  known_debt: []
