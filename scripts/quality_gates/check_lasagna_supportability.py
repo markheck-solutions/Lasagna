@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import os
 import py_compile
 import subprocess
 import sys
 from pathlib import Path
 
-
-MAX_COMPLEXITY = 10
 VAGUE_NAMES = {"utils", "helpers", "common", "misc", "stuff", "shared"}
 SKIPPED_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
 
@@ -18,9 +15,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "mode",
-        choices=("lint", "format", "typecheck", "complexity", "architecture", "tests", "compile", "sql"),
+        choices=(
+            "lint",
+            "format",
+            "typecheck",
+            "complexity",
+            "architecture",
+            "tests",
+            "compile",
+            "sql",
+        ),
     )
-    parser.add_argument("scope", nargs="*", help="repo-wide scope marker; pass . for governed coverage")
+    parser.add_argument(
+        "scope", nargs="*", help="repo-wide scope marker; pass . for governed coverage"
+    )
     args = parser.parse_args(argv)
     checks = {
         "lint": run_lint,
@@ -61,11 +69,7 @@ def source_python_files() -> list[Path]:
 
 
 def test_required_python_files() -> list[Path]:
-    return [
-        path
-        for path in python_files()
-        if path.parts and path.parts[0] in {"scripts", "src"}
-    ]
+    return [path for path in python_files() if path.parts and path.parts[0] in {"scripts", "src"}]
 
 
 def run_lint() -> int:
@@ -99,19 +103,12 @@ def run_typecheck() -> int:
 
 
 def run_complexity() -> int:
-    failures = []
-    for path in python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                score = complexity(node)
-                if score > MAX_COMPLEXITY:
-                    failures.append(f"{path}:{node.lineno} {node.name} complexity {score} > {MAX_COMPLEXITY}")
-    if failures:
-        print("\n".join(failures), file=sys.stderr)
+    if not has_pyproject_section("[tool.ruff.lint.mccabe]"):
+        print("FAIL complexity: Ruff McCabe/C901 config missing", file=sys.stderr)
         return 1
-    print(f"PASS complexity: {len(python_files())} Python files checked")
-    return 0
+    if install_dev_dependencies() != 0:
+        return 1
+    return run([sys.executable, "-m", "ruff", "check", "--select", "C901", "."])
 
 
 def run_architecture() -> int:
@@ -194,31 +191,6 @@ def select_star_failures(sql_files: list[Path]) -> list[str]:
         if "select *" in text:
             failures.append(f"{path}: SELECT * is not supportable")
     return failures
-
-
-def complexity(node: ast.AST) -> int:
-    score = 1
-    branch_nodes = (
-        ast.If,
-        ast.For,
-        ast.AsyncFor,
-        ast.While,
-        ast.ExceptHandler,
-        ast.IfExp,
-        ast.With,
-        ast.AsyncWith,
-        ast.Assert,
-        ast.Try,
-        ast.Match,
-    )
-    for child in ast.walk(node):
-        if isinstance(child, branch_nodes):
-            score += 1
-        elif isinstance(child, ast.BoolOp):
-            score += max(1, len(child.values) - 1)
-        elif isinstance(child, ast.comprehension):
-            score += 1 + len(child.ifs)
-    return score
 
 
 def install_dev_dependencies() -> int:

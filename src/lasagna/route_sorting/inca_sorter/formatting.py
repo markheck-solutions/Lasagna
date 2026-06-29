@@ -279,8 +279,8 @@ def _append_missing_hub_assignment_notations(
         return
 
     hub_lookup = _build_hub_assignment_lookup(hub_records)
-    for site in sorted(_site_types_by_site(rows, hub_check_sites)):
-        site_types = _site_types_by_site(rows, hub_check_sites)[site]
+    site_types_by_site = _site_types_by_site(rows, hub_check_sites)
+    for site, site_types in sorted(site_types_by_site.items()):
         if not _site_requires_hub_assignment(site_types):
             continue
         consumable, _hub = hub_lookup.get(site, ("", ""))

@@ -1,7 +1,10 @@
 from lasagna.route_sorting.inca_sorter.models import InCARow
 from lasagna.route_sorting.inca_sorter.sorting import (
+    _filter_site_order_for_data,
     _interleave_inter_site_trunk_pairs,
     _prepare_route_sort,
+    build_trunk_endpoint_lookup,
+    parse_snowflake_edges,
     sort_inca_route_path,
 )
 
@@ -89,6 +92,36 @@ def test_route_order_site_gap_falls_back_to_hierarchy_topology() -> None:
 
     assert "Site order: AAA -> BBB -> CCC" in result.info_lines
     assert [row.site_code for row in result.rows] == ["AAA", "AAA", "BBB", "CCC"]
+
+
+def test_site_variant_filter_preserves_ascending_numeric_suffixes() -> None:
+    sites = {"ASH/2", "ASH/3"}
+
+    assert _filter_site_order_for_data(["ASH/2", "ASH/3"], sites, set()) == ["ASH/2", "ASH/3"]
+    assert _filter_site_order_for_data(["ASH/3", "ASH/2"], sites, set()) == ["ASH/2", "ASH/3"]
+
+
+def test_trunk_endpoint_lookup_matches_normalized_edge_names() -> None:
+    service_id = "IC-123456"
+    trunk = "ASH/2-ASH/3 OL02"
+    lookup = build_trunk_endpoint_lookup(
+        [
+            {
+                "BPK_PCG": trunk,
+                "A_SITE_CODE": "ASH/2",
+                "B_SITE_CODE": "ASH/3",
+            }
+        ]
+    )
+
+    edges = parse_snowflake_edges(
+        [{"SERVICE_ID": service_id, "EDGE_NAME": " ash/2-ash/3 ol02 ", "LEVEL": "L1"}],
+        service_id,
+        {"ASH/2", "ASH/3"},
+        lookup,
+    )
+
+    assert edges == [("ASH/2", "ASH/3", "ash/2-ash/3 ol02")]
 
 
 def test_segment_assembly_keeps_crossed_inter_site_trunks_contiguous() -> None:

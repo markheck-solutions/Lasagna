@@ -6,7 +6,7 @@ import argparse
 import csv
 import os
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from lasagna.snowflake.sql_template import render_explicit_service_route_sql
 
 FALLBACK_CONNECTION_NAME = "sdm_runner"
 CONNECTION_ENV_VAR = "LASAGNA_SNOWFLAKE_CONNECTION"
+EXPORT_FETCH_BATCH_SIZE = 1000
 
 
 def _import_snowflake_connector() -> Any:
@@ -73,10 +74,18 @@ def _cursor_description_names(cursor: Any) -> list[str]:
     return names
 
 
-def _final_export_rows(cursor: Any) -> list[tuple[Any, Any]] | None:
+def _iter_cursor_rows(cursor: Any) -> Iterator[tuple[Any, ...]]:
+    while True:
+        batch = cursor.fetchmany(EXPORT_FETCH_BATCH_SIZE)
+        if not batch:
+            return
+        yield from batch
+
+
+def _final_export_rows(cursor: Any) -> Iterator[tuple[Any, Any]] | None:
     if _cursor_description_names(cursor)[:2] != ["QID", "ROW_DATA"]:
         return None
-    return [(row[0], row[1]) for row in cursor.fetchall()]
+    return ((row[0], row[1]) for row in _iter_cursor_rows(cursor))
 
 
 def execute_combined_export(conn: Any, sql_text: str) -> list[tuple[Any, Any]]:
@@ -87,13 +96,27 @@ def execute_combined_export(conn: Any, sql_text: str) -> list[tuple[Any, Any]]:
         for cursor in cursors:
             rows = _final_export_rows(cursor)
             if rows is not None:
-                final_rows = rows
+                final_rows = list(rows)
     finally:
         for cursor in cursors:
             cursor.close()
     if final_rows is None:
         raise RuntimeError("Lasagna Snowflake export did not return QID,ROW_DATA.")
     return final_rows
+
+
+def write_combined_export_csv(conn: Any, sql_text: str, output_path: Path) -> int:
+    """Execute rendered SQL and stream final QID/ROW_DATA rows to CSV."""
+    cursors = list(conn.execute_string(sql_text))
+    try:
+        for cursor in cursors:
+            rows = _final_export_rows(cursor)
+            if rows is not None:
+                return write_combined_csv(output_path, rows)
+    finally:
+        for cursor in cursors:
+            cursor.close()
+    raise RuntimeError("Lasagna Snowflake export did not return QID,ROW_DATA.")
 
 
 def write_combined_csv(path: Path, rows: Iterable[tuple[Any, Any]]) -> int:
@@ -123,10 +146,9 @@ def export_service_ids_to_combined_csv(
         generated_sql_path.write_text(sql_text, encoding="utf-8")
     conn = connect_with_connection_name(connection)
     try:
-        rows = execute_combined_export(conn, sql_text)
+        return write_combined_export_csv(conn, sql_text, output_path)
     finally:
         conn.close()
-    return write_combined_csv(output_path, rows)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

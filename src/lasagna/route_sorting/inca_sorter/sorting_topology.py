@@ -270,6 +270,7 @@ def build_trunk_endpoint_lookup(
         b_site = str(record.get("B_SITE_CODE", "")).strip()
         if trunk_name and a_site and b_site:
             lookup[trunk_name] = (a_site, b_site)
+            lookup[_normalize_trunk_name_key(trunk_name)] = (a_site, b_site)
     return lookup
 
 
@@ -375,6 +376,9 @@ def _resolve_edge_sites(
     """Resolve edge endpoints from metadata lookups or a name parser."""
     if trunk_endpoint_lookup and edge_name in trunk_endpoint_lookup:
         return trunk_endpoint_lookup[edge_name]
+    normalized_edge_name = _normalize_trunk_name_key(edge_name)
+    if trunk_endpoint_lookup and normalized_edge_name in trunk_endpoint_lookup:
+        return trunk_endpoint_lookup[normalized_edge_name]
     if transmission_endpoint_lookup and edge_name in transmission_endpoint_lookup:
         return transmission_endpoint_lookup[edge_name]
     return _parse_edge_site_pair(edge_name, known_sites)
@@ -769,7 +773,7 @@ def _should_swap_site_variants(left: str, right: str) -> bool:
     left_base, left_num = _site_variant_info(left)
     right_base, right_num = _site_variant_info(right)
     if left_num is not None and right_num is not None and left_base == right_base:
-        return left_num < right_num
+        return left_num > right_num
     return left_num is not None and right_num is None and left_base == right
 
 

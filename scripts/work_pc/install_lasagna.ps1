@@ -123,6 +123,6 @@ Write-Host "Lasagna installed: $ResolvedInstallDir"
 if (-not $NoDesktopShortcut) {
     Write-Host "Lasagna desktop shortcut: $ShortcutPath"
 }
-if (-not $NoLaunch) {
+if (-not $NoLaunch -and -not $NoDesktopShortcut) {
     Start-Process -FilePath $ShortcutPath
 }

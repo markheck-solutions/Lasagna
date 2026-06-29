@@ -4,6 +4,7 @@ import csv
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -150,6 +151,10 @@ def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) ->
         resume=False,
         start_fresh=False,
     )
+
+
+def expire_internal_deadline(state: Any) -> None:
+    state.deadline_started_monotonic = time.monotonic() - state.config.internal_deadline_seconds - 1
 
 
 class FailingTablesCursor(FakeCursor):
@@ -375,7 +380,7 @@ def test_status_split_preserves_passed_metadata_on_exception(tmp_path: Path) -> 
         lambda: collector.phase_build_structured_id_dictionary(state),
     )
 
-    state.deadline_started_monotonic = 0
+    expire_internal_deadline(state)
     with pytest.raises(collector.InternalDeadlineExceededError):
         collector.run_phase(
             state,
@@ -417,7 +422,7 @@ def test_phase_log_and_status_split_agree_for_completed_metadata_after_timeout(
     collector.run_phase(
         state, "write_schema_profile", lambda: collector.phase_write_schema_profile(state)
     )
-    state.deadline_started_monotonic = 0
+    expire_internal_deadline(state)
 
     with pytest.raises(collector.InternalDeadlineExceededError):
         collector.run_phase(
