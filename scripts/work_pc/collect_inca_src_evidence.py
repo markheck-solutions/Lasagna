@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import time
@@ -368,6 +369,7 @@ def write_baseline_artifacts(state: RunState) -> None:
         write_csv_artifact(state.run_dir / "skipped_objects.csv", SKIPPED_OBJECTS_COLUMNS, ())
         write_csv_artifact(state.run_dir / "query_log.csv", QUERY_LOG_COLUMNS, ())
         write_csv_artifact(state.run_dir / "phase_log.csv", PHASE_LOG_COLUMNS, ())
+        write_progress_summary(state, "initialize_run")
         write_json_artifact(
             state.run_dir / "graph_closure_summary.json",
             graph_closure_summary_payload(
@@ -739,6 +741,17 @@ def phase_extract_service_seed_ids(cursor: object, state: RunState) -> None:
 
 
 def phase_run_exact_id_overlap_scan(cursor: object, state: RunState) -> None:
+    write_csv_artifact(state.run_dir / "exact_match_hits.csv", EXACT_MATCH_HITS_COLUMNS, ())
+    write_csv_artifact(state.run_dir / "coverage_matrix.csv", COVERAGE_MATRIX_COLUMNS, ())
+    write_csv_artifact(state.run_dir / "evidence_edges.csv", EVIDENCE_EDGES_COLUMNS, ())
+    write_csv_artifact(
+        state.run_dir / "edge_semantics_registry.csv", EDGE_SEMANTICS_REGISTRY_COLUMNS, ()
+    )
+    write_json_artifact(
+        state.run_dir / "join_paths.json",
+        {"accepted_paths": [], "rejected_paths": [], "unknown_semantics_paths": []},
+    )
+    write_progress_summary(state, "run_exact_id_overlap_scan")
     state.graph_scan = scan_evidence_graph(
         cursor, state.config, state.proof_by_object, state.seed_scan.seed_nodes, state
     )
@@ -842,7 +855,7 @@ def status_payload_for_state(state: RunState) -> dict[str, object]:
             "deterministic classification written",
             [],
         )
-    if state.config.phase_mode == "seed-only":
+    if seed_scan_started(state):
         seed_status = (
             INCOMPLETE
             if state.seed_scan.incomplete_areas
@@ -905,6 +918,7 @@ def should_write_negative_ledger(state: RunState) -> bool:
 
 def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception) -> None:
     phase = str(state.run_manifest.get("current_phase", "unknown"))
+    record_exception_incomplete_area(state, phase, f"{reason}: {exc}")
     mark_statuses_incomplete(state, f"{reason}: {exc}")
     state.run_manifest["run_status"] = INCOMPLETE
     state.run_manifest["completed_at"] = utc_now()
@@ -912,7 +926,7 @@ def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception
     state.run_manifest["negative_evidence_allowed"] = False
     write_json_artifact(state.run_dir / "run_manifest.json", state.run_manifest)
     write_json_artifact(state.run_dir / "status_split.json", state.status_split)
-    write_checkpoint(state, phase, reason=f"{reason}: {exc}")
+    mark_checkpoint_incomplete(state, phase, f"{reason}: {exc}")
     write_json_artifact(
         state.run_dir / "graph_closure_summary.json",
         graph_closure_summary_payload(
@@ -936,6 +950,17 @@ def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception
                 len(state.graph_scan.evidence_rows),
             ),
         ),
+    )
+    write_progress_summary(state, phase, reason=f"{reason}: {exc}")
+
+
+def seed_scan_started(state: RunState) -> bool:
+    return bool(
+        state.seed_scan.searched_anchor_columns
+        or state.seed_scan.seed_nodes
+        or state.seed_scan.seed_rows
+        or state.seed_scan.incomplete_areas
+        or state.seed_scan.skipped_rows
     )
 
 
@@ -1108,6 +1133,7 @@ def write_checkpoint(state: RunState, phase: str, reason: str = "") -> None:
         "phase": phase,
         "reason": reason,
         "updated_at": utc_now(),
+        "current_node_key": "",
         "current_object": "",
         "current_column": "",
         "current_id_domain": "",
@@ -1130,12 +1156,14 @@ def write_scan_checkpoint(
     expected: int,
     fetched: int,
     visited_predicates: set[tuple[str, str, str]] | None = None,
+    discovered_node_keys: list[str] | None = None,
 ) -> None:
     payload = {
         "run_id": state.config.run_id,
         "phase": phase,
         "reason": "",
         "updated_at": utc_now(),
+        "current_node_key": "" if node is None else node.key,
         "current_object": profile.object_name,
         "current_column": profile.column_name,
         "current_id_domain": "" if node is None else node.id_domain,
@@ -1144,10 +1172,145 @@ def write_scan_checkpoint(
         "rows_expected": expected,
         "rows_fetched": fetched,
         "visited_predicate_keys": ["|".join(item) for item in sorted(visited_predicates or set())],
-        "discovered_node_keys": sorted(state.seed_scan.seed_nodes),
+        "discovered_node_keys": sorted(discovered_node_keys or state.seed_scan.seed_nodes),
         "evidence_edge_hashes": [evidence_edge_hash(row) for row in state.graph_scan.evidence_rows],
     }
     write_json_artifact(state.run_dir / "checkpoint.json", payload)
+
+
+def mark_checkpoint_incomplete(state: RunState, phase: str, reason: str) -> None:
+    checkpoint = state.run_dir / "checkpoint.json"
+    if not checkpoint.exists():
+        write_checkpoint(state, phase, reason=reason)
+        return
+    payload = json_load_or_empty(checkpoint)
+    if not payload:
+        write_checkpoint(state, phase, reason=reason)
+        return
+    payload["phase"] = payload.get("phase") or phase
+    payload["reason"] = reason
+    payload["updated_at"] = utc_now()
+    write_json_artifact(checkpoint, payload)
+
+
+def json_load_or_empty(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def record_exception_incomplete_area(state: RunState, phase: str, reason: str) -> None:
+    checkpoint = json_load_or_empty(state.run_dir / "checkpoint.json")
+    area = incomplete_area_from_checkpoint(state, checkpoint, reason)
+    if area is None:
+        return
+    if phase == "extract_service_seed_ids":
+        state.seed_scan = SeedScanResult(
+            state.seed_scan.seed_nodes,
+            state.seed_scan.seed_rows,
+            state.seed_scan.searched_anchor_columns,
+            state.seed_scan.exact_anchor_hits,
+            [*state.seed_scan.incomplete_areas, area],
+            state.seed_scan.skipped_rows,
+        )
+    elif phase == "run_exact_id_overlap_scan":
+        state.graph_scan = GraphScanResult(
+            state.graph_scan.evidence_rows,
+            state.graph_scan.exact_hits,
+            state.graph_scan.coverage_rows,
+            [*state.graph_scan.incomplete_areas, area],
+            state.graph_scan.skipped_rows,
+        )
+
+
+def incomplete_area_from_checkpoint(
+    state: RunState, checkpoint: dict[str, object], reason: str
+) -> IncompleteArea | None:
+    object_name = str(checkpoint.get("current_object", ""))
+    column_name = str(checkpoint.get("current_column", ""))
+    if not object_name or not column_name:
+        return None
+    return IncompleteArea(
+        object_name=object_name,
+        column_name=column_name,
+        id_node_key=str(checkpoint.get("current_node_key", "")),
+        expected_row_count=int_or_zero(checkpoint.get("rows_expected")),
+        fetched_row_count=int_or_zero(checkpoint.get("rows_fetched")),
+        page_size=state.config.page_size,
+        attempted_mitigations=(
+            "count-first exact predicate",
+            "pagination checkpoint",
+            "internal deadline before bridge timeout",
+        ),
+        stop_reason=reason,
+        resume_checkpoint=str(state.run_dir / "checkpoint.json"),
+    )
+
+
+def int_or_zero(value: object) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def refresh_graph_scan_state(
+    state: RunState | None,
+    evidence_rows: list[EvidenceRow],
+    exact_hits: list[dict[str, object]],
+    coverage_rows: list[dict[str, object]],
+    incomplete_areas: list[IncompleteArea],
+    skipped_rows: list[dict[str, object]],
+) -> None:
+    if state is None:
+        return
+    state.graph_scan = GraphScanResult(
+        evidence_rows, exact_hits, coverage_rows, incomplete_areas, skipped_rows
+    )
+
+
+def write_progress_summary(
+    state: RunState,
+    phase: str,
+    *,
+    current_object: str = "",
+    current_column: str = "",
+    current_node_key: str = "",
+    pass_number: int = 0,
+    visited_predicate_count: int = 0,
+    known_node_count: int | None = None,
+    rows_expected: int = 0,
+    rows_fetched: int = 0,
+    reason: str = "",
+) -> None:
+    payload = {
+        "run_id": state.config.run_id,
+        "service_id": state.config.service_id,
+        "phase": phase,
+        "updated_at": utc_now(),
+        "current_object": current_object,
+        "current_column": current_column,
+        "current_node_key": current_node_key,
+        "pass_number": pass_number,
+        "visited_predicate_count": visited_predicate_count,
+        "seed_node_count": len(state.seed_scan.seed_nodes),
+        "known_node_count": known_node_count
+        if known_node_count is not None
+        else len(state.seed_scan.seed_nodes),
+        "exact_hit_count": len(state.graph_scan.exact_hits),
+        "coverage_row_count": len(state.graph_scan.coverage_rows),
+        "evidence_row_count": len(state.graph_scan.evidence_rows),
+        "incomplete_area_count": len(
+            [*state.seed_scan.incomplete_areas, *state.graph_scan.incomplete_areas]
+        ),
+        "rows_expected": rows_expected,
+        "rows_fetched": rows_fetched,
+        "negative_evidence_allowed": False,
+        "reason": reason,
+    }
+    write_json_artifact(state.run_dir / "progress_summary.json", payload)
 
 
 def append_csv_row(path: Path, fieldnames: tuple[str, ...], row: dict[str, object]) -> None:
@@ -1360,6 +1523,7 @@ def scan_evidence_graph(
     incomplete_areas: list[IncompleteArea] = []
     visited_predicates: set[tuple[str, str, str]] = set()
     visited_rows: set[str] = set()
+    registry_keys_written: set[str] = set()
     pass_number = 0
     while True:
         pass_number += 1
@@ -1383,7 +1547,11 @@ def scan_evidence_graph(
                 coverage_rows,
                 skipped_rows,
                 incomplete_areas,
+                registry_keys_written,
                 state,
+            )
+            refresh_graph_scan_state(
+                state, evidence_rows, exact_hits, coverage_rows, incomplete_areas, skipped_rows
             )
         if len(known_nodes) == before_nodes and len(visited_rows) == before_rows:
             break
@@ -1404,6 +1572,7 @@ def scan_object_predicates(
     coverage_rows: list[dict[str, object]],
     skipped_rows: list[dict[str, object]],
     incomplete_areas: list[IncompleteArea],
+    registry_keys_written: set[str],
     state: RunState | None = None,
 ) -> None:
     for predicate_column in proof_columns:
@@ -1428,6 +1597,17 @@ def scan_object_predicates(
                     0,
                     0,
                     visited_predicates,
+                    sorted(known_nodes),
+                )
+                write_progress_summary(
+                    state,
+                    "run_exact_id_overlap_scan",
+                    current_object=predicate_column.object_name,
+                    current_column=predicate_column.column_name,
+                    current_node_key=node.key,
+                    pass_number=pass_number,
+                    visited_predicate_count=len(visited_predicates),
+                    known_node_count=len(known_nodes),
                 )
             visited_predicates.add(predicate_key)
             scan_single_predicate(
@@ -1444,6 +1624,7 @@ def scan_object_predicates(
                 coverage_rows,
                 skipped_rows,
                 incomplete_areas,
+                registry_keys_written,
                 state,
                 visited_predicates,
             )
@@ -1463,6 +1644,7 @@ def scan_single_predicate(
     coverage_rows: list[dict[str, object]],
     skipped_rows: list[dict[str, object]],
     incomplete_areas: list[IncompleteArea],
+    registry_keys_written: set[str],
     state: RunState | None = None,
     visited_predicates: set[tuple[str, str, str]] | None = None,
 ) -> None:
@@ -1483,64 +1665,270 @@ def scan_single_predicate(
             "exact_count",
         )
     except Exception as exc:
-        skipped_rows.append(
-            skipped_row(config, predicate_column, "EXACT_COUNT_FAILED", str(exc), True)
-        )
-        incomplete_areas.append(exact_incomplete_area(config, predicate_column, node, str(exc)))
-        return
-    pages = pages_to_fetch(count, config.page_size)
-    incomplete_reason = ""
-    if pages > config.max_pages_per_predicate:
-        incomplete_reason = (
-            "page count exceeds configured operational max and owner approval needed"
-        )
-        incomplete_areas.append(exact_fanout_area(config, predicate_column, node, count))
-        pages = config.max_pages_per_predicate
-    if state is not None:
-        write_scan_checkpoint(
-            state,
-            "run_exact_id_overlap_scan",
+        record_exact_count_failure(
+            config,
             predicate_column,
             node,
-            count,
-            0,
-            visited_predicates,
+            str(exc),
+            skipped_rows,
+            incomplete_areas,
+            state,
+            evidence_rows,
+            exact_hits,
+            coverage_rows,
         )
+        return
+    pages, incomplete_reason = limit_exact_pages(
+        config, predicate_column, node, count, incomplete_areas
+    )
+    record_scan_progress(
+        state, predicate_column, node, pass_number, visited_predicates, known_nodes, count, 0
+    )
     fetched_rows = fetch_exact_pages(
         cursor, config, predicate_column, proof_columns, node, pages, state
     )
-    coverage_rows.append(
-        coverage_row(
-            config, predicate_column, node, pass_number, count, len(fetched_rows), incomplete_reason
-        )
+    record_exact_coverage(
+        state,
+        config,
+        predicate_column,
+        node,
+        pass_number,
+        count,
+        fetched_rows,
+        incomplete_reason,
+        coverage_rows,
     )
+    record_fetched_exact_rows(
+        state,
+        config,
+        pass_number,
+        predicate_column,
+        proof_columns,
+        node,
+        count,
+        fetched_rows,
+        query_id,
+        predicate_sql,
+        incomplete_reason,
+        known_nodes,
+        visited_rows,
+        evidence_rows,
+        exact_hits,
+        registry_keys_written,
+    )
+    refresh_graph_scan_state(
+        state, evidence_rows, exact_hits, coverage_rows, incomplete_areas, skipped_rows
+    )
+    record_scan_progress(
+        state,
+        predicate_column,
+        node,
+        pass_number,
+        visited_predicates,
+        known_nodes,
+        count,
+        len(fetched_rows),
+        incomplete_reason,
+    )
+
+
+def record_exact_count_failure(
+    config: LiveConfig,
+    predicate_column: ColumnProfile,
+    node: IdNode,
+    reason: str,
+    skipped_rows: list[dict[str, object]],
+    incomplete_areas: list[IncompleteArea],
+    state: RunState | None,
+    evidence_rows: list[EvidenceRow],
+    exact_hits: list[dict[str, object]],
+    coverage_rows: list[dict[str, object]],
+) -> None:
+    skipped_rows.append(skipped_row(config, predicate_column, "EXACT_COUNT_FAILED", reason, True))
+    incomplete_areas.append(exact_incomplete_area(config, predicate_column, node, reason))
+    refresh_graph_scan_state(
+        state, evidence_rows, exact_hits, coverage_rows, incomplete_areas, skipped_rows
+    )
+
+
+def limit_exact_pages(
+    config: LiveConfig,
+    predicate_column: ColumnProfile,
+    node: IdNode,
+    count: int,
+    incomplete_areas: list[IncompleteArea],
+) -> tuple[int, str]:
+    pages = pages_to_fetch(count, config.page_size)
+    if pages <= config.max_pages_per_predicate:
+        return pages, ""
+    reason = "page count exceeds configured operational max and owner approval needed"
+    incomplete_areas.append(exact_fanout_area(config, predicate_column, node, count))
+    return config.max_pages_per_predicate, reason
+
+
+def record_exact_coverage(
+    state: RunState | None,
+    config: LiveConfig,
+    predicate_column: ColumnProfile,
+    node: IdNode,
+    pass_number: int,
+    count: int,
+    fetched_rows: list[tuple[int, dict[str, object]]],
+    incomplete_reason: str,
+    coverage_rows: list[dict[str, object]],
+) -> None:
+    coverage = coverage_row(
+        config, predicate_column, node, pass_number, count, len(fetched_rows), incomplete_reason
+    )
+    coverage_rows.append(coverage)
+    if state is not None:
+        append_csv_row(state.run_dir / "coverage_matrix.csv", COVERAGE_MATRIX_COLUMNS, coverage)
+
+
+def record_fetched_exact_rows(
+    state: RunState | None,
+    config: LiveConfig,
+    pass_number: int,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    node: IdNode,
+    count: int,
+    fetched_rows: list[tuple[int, dict[str, object]]],
+    query_id: str,
+    predicate_sql: str,
+    incomplete_reason: str,
+    known_nodes: dict[str, IdNode],
+    visited_rows: set[str],
+    evidence_rows: list[EvidenceRow],
+    exact_hits: list[dict[str, object]],
+    registry_keys_written: set[str],
+) -> None:
     for page_number, row in fetched_rows:
         row_hash = row_text(row, "ROW_HASH")
-        exact_hits.append(
-            exact_hit_row(
-                config,
-                pass_number,
-                predicate_column,
-                node,
-                count,
-                len(fetched_rows),
-                row_hash,
-                [profile.column_name for profile in proof_columns],
-                query_id,
-                predicate_sql,
-                page_number,
-                incomplete_reason,
-            )
+        exact_hit = exact_hit_for_fetched_row(
+            config,
+            pass_number,
+            predicate_column,
+            proof_columns,
+            node,
+            count,
+            len(fetched_rows),
+            row_hash,
+            query_id,
+            predicate_sql,
+            page_number,
+            incomplete_reason,
         )
+        exact_hits.append(exact_hit)
+        append_exact_hit_if_live(state, exact_hit)
         row_nodes = nodes_from_row(row, proof_columns)
         for discovered in row_nodes.values():
             known_nodes.setdefault(discovered.key, discovered)
         if row_hash in visited_rows or not row_nodes:
             continue
         visited_rows.add(row_hash)
-        evidence_rows.append(
-            evidence_row(config, pass_number, predicate_column.object_name, row_hash, row_nodes)
+        evidence = evidence_row(
+            config, pass_number, predicate_column.object_name, row_hash, row_nodes
         )
+        evidence_rows.append(evidence)
+        append_evidence_if_live(state, config, evidence, registry_keys_written)
+
+
+def exact_hit_for_fetched_row(
+    config: LiveConfig,
+    pass_number: int,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    node: IdNode,
+    count: int,
+    fetched_count: int,
+    row_hash: str,
+    query_id: str,
+    predicate_sql: str,
+    page_number: int,
+    incomplete_reason: str,
+) -> dict[str, object]:
+    return exact_hit_row(
+        config,
+        pass_number,
+        predicate_column,
+        node,
+        count,
+        fetched_count,
+        row_hash,
+        [profile.column_name for profile in proof_columns],
+        query_id,
+        predicate_sql,
+        page_number,
+        incomplete_reason,
+    )
+
+
+def append_exact_hit_if_live(state: RunState | None, exact_hit: dict[str, object]) -> None:
+    if state is None:
+        return
+    append_csv_row(state.run_dir / "exact_match_hits.csv", EXACT_MATCH_HITS_COLUMNS, exact_hit)
+
+
+def append_evidence_if_live(
+    state: RunState | None,
+    config: LiveConfig,
+    evidence: EvidenceRow,
+    registry_keys_written: set[str],
+) -> None:
+    if state is None:
+        return
+    append_csv_row(
+        state.run_dir / "evidence_edges.csv",
+        EVIDENCE_EDGES_COLUMNS,
+        evidence_edge_rows(config, [evidence])[0],
+    )
+    if evidence.semantics_registry_key in registry_keys_written:
+        return
+    append_csv_row(
+        state.run_dir / "edge_semantics_registry.csv",
+        EDGE_SEMANTICS_REGISTRY_COLUMNS,
+        registry_csv_rows([evidence])[0],
+    )
+    registry_keys_written.add(evidence.semantics_registry_key)
+
+
+def record_scan_progress(
+    state: RunState | None,
+    predicate_column: ColumnProfile,
+    node: IdNode,
+    pass_number: int,
+    visited_predicates: set[tuple[str, str, str]] | None,
+    known_nodes: dict[str, IdNode],
+    rows_expected: int,
+    rows_fetched: int,
+    reason: str = "",
+) -> None:
+    if state is None:
+        return
+    write_scan_checkpoint(
+        state,
+        "run_exact_id_overlap_scan",
+        predicate_column,
+        node,
+        rows_expected,
+        rows_fetched,
+        visited_predicates,
+        sorted(known_nodes),
+    )
+    write_progress_summary(
+        state,
+        "run_exact_id_overlap_scan",
+        current_object=predicate_column.object_name,
+        current_column=predicate_column.column_name,
+        current_node_key=node.key,
+        pass_number=pass_number,
+        visited_predicate_count=len(visited_predicates or set()),
+        known_node_count=len(known_nodes),
+        rows_expected=rows_expected,
+        rows_fetched=rows_fetched,
+        reason=reason,
+    )
 
 
 def execute_rows(

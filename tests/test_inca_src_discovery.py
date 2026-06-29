@@ -157,6 +157,21 @@ class FailingTablesCursor(FakeCursor):
         super().execute(sql, params)
 
 
+class ExactScanCursor(FakeCursor):
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append(sql)
+        self.sfqid = f"Q{len(self.calls)}"
+        upper = sql.upper()
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(1,)]
+        elif "ROW_HASH" in upper:
+            self.description = [("CONTENT_INT_ID",), ("CABPT_INT_ID",), ("ROW_HASH",)]
+            self._rows = [(123, 456, "ROW-HASH-1")]
+        else:
+            super().execute(sql, params)
+
+
 def write_snapshot_docs(repo_root: Path) -> None:
     docs = {
         "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md": "runbook snapshot",
@@ -454,6 +469,7 @@ def test_external_interruption_after_initialization_does_not_leave_only_command_
     assert "command_log.sql" in names
     assert {"run_manifest.json", "status_split.json", "coverage_matrix.csv"} <= names
     assert names != {"command_log.sql"}
+    assert (state.run_dir / "progress_summary.json").exists()
 
 
 def test_internal_deadline_expires_before_bridge_timeout_and_writes_incomplete(
@@ -485,6 +501,88 @@ def test_query_log_records_phase_logical_sql_hash_timestamps_and_status(
     assert rows[-1]["started_at"]
     assert rows[-1]["completed_at"]
     assert rows[-1]["status"] == PASS
+
+
+def test_exact_scan_appends_partial_artifacts_during_predicate_scan(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+    content = column("CONTENT_INT_ID")
+    cabpt = column("CABPT_INT_ID")
+    node = node_from_value("PROD_ACCESS_DB", "INCA_SRC", "CONTENT_INT_ID", 123, "NUMBER")
+    state.seed_scan = collector.SeedScanResult({node.key: node}, [], 1, 1, [], [])
+
+    collector.scan_single_predicate(
+        ExactScanCursor(),
+        state.config,
+        1,
+        content,
+        [content, cabpt],
+        node,
+        {node.key: node},
+        set(),
+        [],
+        [],
+        [],
+        [],
+        [],
+        set(),
+        state,
+        set(),
+    )
+
+    exact_rows = list(csv.DictReader((state.run_dir / "exact_match_hits.csv").open()))
+    coverage_rows = list(csv.DictReader((state.run_dir / "coverage_matrix.csv").open()))
+    edge_rows = list(csv.DictReader((state.run_dir / "evidence_edges.csv").open()))
+    progress = json.loads((state.run_dir / "progress_summary.json").read_text())
+
+    assert len(exact_rows) == 1
+    assert len(coverage_rows) == 1
+    assert len(edge_rows) == 1
+    assert progress["current_object"] == "RELATION_TABLE"
+    assert progress["current_column"] == "CONTENT_INT_ID"
+    assert progress["exact_hit_count"] == 1
+    assert progress["evidence_row_count"] == 1
+
+
+def test_full_timeout_preserves_seed_pass_and_scan_checkpoint_context(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path))
+    content = column("CONTENT_INT_ID")
+    node = node_from_value("PROD_ACCESS_DB", "INCA_SRC", "CONTENT_INT_ID", 123, "NUMBER")
+    state.metadata = {
+        "tables": [{"TABLE_NAME": "RELATION_TABLE"}],
+        "columns": [{"COLUMN_NAME": "X"}],
+    }
+    state.dictionary_rows = [{"id_domain": "CONTENT_INT_ID"}]
+    state.seed_scan = collector.SeedScanResult({node.key: node}, [], 1, 1, [], [])
+    state.run_manifest["current_phase"] = "run_exact_id_overlap_scan"
+
+    collector.write_scan_checkpoint(
+        state,
+        "run_exact_id_overlap_scan",
+        content,
+        node,
+        10,
+        3,
+        {("RELATION_TABLE", "CONTENT_INT_ID", node.key)},
+        [node.key],
+    )
+    collector.mark_incomplete_after_exception(
+        state, "internal deadline exceeded", TimeoutError("deadline")
+    )
+
+    checkpoint = json.loads((state.run_dir / "checkpoint.json").read_text())
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    graph = json.loads((state.run_dir / "graph_closure_summary.json").read_text())
+
+    assert checkpoint["current_object"] == "RELATION_TABLE"
+    assert checkpoint["current_column"] == "CONTENT_INT_ID"
+    assert checkpoint["current_node_key"] == node.key
+    assert checkpoint["rows_expected"] == 10
+    assert checkpoint["rows_fetched"] == 3
+    assert statuses["IC-388612 ID extraction"]["status"] == PASS
+    assert statuses["Exact-ID overlap scan"]["status"] == INCOMPLETE
+    assert graph["incomplete_area_count"] == 1
 
 
 def test_metadata_only_mode_does_not_run_exact_id_scan_or_graph_closure(
