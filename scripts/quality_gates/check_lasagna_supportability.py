@@ -1,26 +1,39 @@
 from __future__ import annotations
 
 import argparse
-import ast
+import hashlib
 import os
 import py_compile
 import subprocess
 import sys
 from pathlib import Path
 
-
-MAX_COMPLEXITY = 10
 VAGUE_NAMES = {"utils", "helpers", "common", "misc", "stuff", "shared"}
 SKIPPED_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
+QUALITY_CACHE_DIR = Path("build") / "quality-gates"
+RUFF_CACHE_DIR = QUALITY_CACHE_DIR / "ruff-cache"
+MYPY_CACHE_DIR = QUALITY_CACHE_DIR / "mypy-cache"
+DEPENDENCY_MARKER = QUALITY_CACHE_DIR / "deps-installed.sha256"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "mode",
-        choices=("lint", "format", "typecheck", "complexity", "architecture", "tests", "compile", "sql"),
+        choices=(
+            "lint",
+            "format",
+            "typecheck",
+            "complexity",
+            "architecture",
+            "tests",
+            "compile",
+            "sql",
+        ),
     )
-    parser.add_argument("scope", nargs="*", help="repo-wide scope marker; pass . for governed coverage")
+    parser.add_argument(
+        "scope", nargs="*", help="repo-wide scope marker; pass . for governed coverage"
+    )
     args = parser.parse_args(argv)
     checks = {
         "lint": run_lint,
@@ -61,20 +74,16 @@ def source_python_files() -> list[Path]:
 
 
 def test_required_python_files() -> list[Path]:
-    return [
-        path
-        for path in python_files()
-        if path.parts and path.parts[0] in {"scripts", "src"}
-    ]
+    return [path for path in python_files() if path.parts and path.parts[0] in {"scripts", "src"}]
 
 
 def run_lint() -> int:
     if run_compile() != 0:
         return 1
     if has_pyproject_section("[tool.ruff]"):
-        if install_dev_dependencies() != 0:
+        if install_quality_dependencies() != 0:
             return 1
-        return run([sys.executable, "-m", "ruff", "check", "."])
+        return run([sys.executable, "-m", "ruff", "check", "--cache-dir", str(RUFF_CACHE_DIR), "."])
     print("PASS lint: Python syntax checked; no Ruff config present")
     return 0
 
@@ -91,27 +100,32 @@ def run_typecheck() -> int:
     if run_compile() != 0:
         return 1
     if has_pyproject_section("[tool.mypy]"):
-        if install_dev_dependencies() != 0:
+        if install_quality_dependencies() != 0:
             return 1
-        return run([sys.executable, "-m", "mypy"])
+        return run([sys.executable, "-m", "mypy", "--cache-dir", str(MYPY_CACHE_DIR)])
     print("PASS typecheck: Python syntax checked; no mypy config present")
     return 0
 
 
 def run_complexity() -> int:
-    failures = []
-    for path in python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                score = complexity(node)
-                if score > MAX_COMPLEXITY:
-                    failures.append(f"{path}:{node.lineno} {node.name} complexity {score} > {MAX_COMPLEXITY}")
-    if failures:
-        print("\n".join(failures), file=sys.stderr)
+    if not has_pyproject_section("[tool.ruff.lint.mccabe]"):
+        print("FAIL complexity: Ruff McCabe/C901 config missing", file=sys.stderr)
         return 1
-    print(f"PASS complexity: {len(python_files())} Python files checked")
-    return 0
+    if install_quality_dependencies() != 0:
+        return 1
+    return run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--cache-dir",
+            str(RUFF_CACHE_DIR),
+            "--select",
+            "C901",
+            ".",
+        ]
+    )
 
 
 def run_architecture() -> int:
@@ -138,7 +152,7 @@ def run_tests() -> int:
         print("FAIL tests: scripts/src Python files exist but tests/ is missing", file=sys.stderr)
         return 1
     if has_pyproject_section("[tool.pytest.ini_options]"):
-        if install_dev_dependencies() != 0:
+        if install_quality_dependencies() != 0:
             return 1
         return run([sys.executable, "-m", "pytest", "tests"])
     return run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"])
@@ -196,41 +210,42 @@ def select_star_failures(sql_files: list[Path]) -> list[str]:
     return failures
 
 
-def complexity(node: ast.AST) -> int:
-    score = 1
-    branch_nodes = (
-        ast.If,
-        ast.For,
-        ast.AsyncFor,
-        ast.While,
-        ast.ExceptHandler,
-        ast.IfExp,
-        ast.With,
-        ast.AsyncWith,
-        ast.Assert,
-        ast.Try,
-        ast.Match,
-    )
-    for child in ast.walk(node):
-        if isinstance(child, branch_nodes):
-            score += 1
-        elif isinstance(child, ast.BoolOp):
-            score += max(1, len(child.values) - 1)
-        elif isinstance(child, ast.comprehension):
-            score += 1 + len(child.ifs)
-    return score
-
-
-def install_dev_dependencies() -> int:
-    marker = Path(".lasagna-quality-deps-installed")
-    if marker.exists():
+def install_quality_dependencies() -> int:
+    requirement_files = quality_requirement_files()
+    if not requirement_files:
         return 0
-    if not Path("requirements-dev.txt").exists():
+    DEPENDENCY_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    fingerprint = requirements_fingerprint(requirement_files)
+    if (
+        DEPENDENCY_MARKER.exists()
+        and DEPENDENCY_MARKER.read_text(encoding="utf-8").strip() == fingerprint
+    ):
         return 0
-    result = run([sys.executable, "-m", "pip", "install", "-r", "requirements-dev.txt"])
+    command = [sys.executable, "-m", "pip", "install"]
+    for path in requirement_files:
+        command.extend(["-r", str(path)])
+    result = run(command)
     if result == 0:
-        marker.write_text("installed\n", encoding="utf-8")
+        DEPENDENCY_MARKER.write_text(f"{fingerprint}\n", encoding="utf-8")
     return result
+
+
+def quality_requirement_files() -> list[Path]:
+    return [
+        path
+        for path in (Path("requirements-runtime.txt"), Path("requirements-dev.txt"))
+        if path.exists()
+    ]
+
+
+def requirements_fingerprint(requirement_files: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in requirement_files:
+        digest.update(path.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def has_pyproject_section(section: str) -> bool:

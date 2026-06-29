@@ -17,6 +17,16 @@ class QualityGateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_checker_complexity_mode_uses_configured_c901_gate(self) -> None:
+        script = Path("scripts/quality_gates/check_lasagna_supportability.py")
+        result = subprocess.run(
+            [sys.executable, str(script), "complexity", "."],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
