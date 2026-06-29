@@ -951,7 +951,7 @@ def mark_incomplete_after_exception(state: RunState, reason: str, exc: Exception
             ),
         ),
     )
-    write_progress_summary(state, phase, reason=f"{reason}: {exc}")
+    write_progress_from_checkpoint(state, phase, f"{reason}: {exc}")
 
 
 def seed_scan_started(state: RunState) -> bool:
@@ -1122,8 +1122,8 @@ def execute_observed_rows(
 def check_deadline(state: RunState, phase: str, context: str) -> None:
     elapsed = time.monotonic() - state.deadline_started_monotonic
     if elapsed >= state.config.internal_deadline_seconds:
-        write_checkpoint(state, phase, reason=f"internal deadline before {context}")
         msg = f"internal deadline expired after {int(elapsed)} seconds during {phase}: {context}"
+        mark_checkpoint_incomplete(state, phase, msg)
         raise InternalDeadlineExceededError(msg)
 
 
@@ -1311,6 +1311,26 @@ def write_progress_summary(
         "reason": reason,
     }
     write_json_artifact(state.run_dir / "progress_summary.json", payload)
+
+
+def write_progress_from_checkpoint(state: RunState, phase: str, reason: str) -> None:
+    checkpoint = json_load_or_empty(state.run_dir / "checkpoint.json")
+    write_progress_summary(
+        state,
+        phase,
+        current_object=str(checkpoint.get("current_object", "")),
+        current_column=str(checkpoint.get("current_column", "")),
+        current_node_key=str(checkpoint.get("current_node_key", "")),
+        visited_predicate_count=json_list_count(checkpoint.get("visited_predicate_keys")),
+        known_node_count=json_list_count(checkpoint.get("discovered_node_keys")),
+        rows_expected=int_or_zero(checkpoint.get("rows_expected")),
+        rows_fetched=int_or_zero(checkpoint.get("rows_fetched")),
+        reason=reason,
+    )
+
+
+def json_list_count(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
 
 
 def append_csv_row(path: Path, fieldnames: tuple[str, ...], row: dict[str, object]) -> None:
