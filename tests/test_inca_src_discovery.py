@@ -270,11 +270,21 @@ def test_run_manifest_includes_framework_commit_schema_contracts_and_constraints
     assert manifest["hard_constraints"]["sorter_changes_allowed"] is False
     assert manifest["hard_constraints"]["port_match_rule_changes_allowed"] is False
     assert manifest["negative_evidence_allowed"] is False
-    assert manifest["runbook_path"].endswith("docs\\runbooks\\INCA_SRC_EVIDENCE_FRAMEWORK.md")
-    assert manifest["status_contract_path"].endswith(
-        "docs\\contracts\\INCA_SRC_EVIDENCE_STATUS_CONTRACT.md"
+    assert Path(manifest["runbook_path"]).parts[-3:] == (
+        "docs",
+        "runbooks",
+        "INCA_SRC_EVIDENCE_FRAMEWORK.md",
     )
-    assert manifest["handoff_path"].endswith("docs\\ai_handoffs\\INCA_SRC_EVIDENCE_HANDOFF.md")
+    assert Path(manifest["status_contract_path"]).parts[-3:] == (
+        "docs",
+        "contracts",
+        "INCA_SRC_EVIDENCE_STATUS_CONTRACT.md",
+    )
+    assert Path(manifest["handoff_path"]).parts[-3:] == (
+        "docs",
+        "ai_handoffs",
+        "INCA_SRC_EVIDENCE_HANDOFF.md",
+    )
 
 
 def test_run_folder_includes_framework_status_and_handoff_snapshots(tmp_path: Path) -> None:
