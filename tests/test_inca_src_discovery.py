@@ -140,6 +140,8 @@ def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) ->
         page_size=100,
         max_pages_per_predicate=25,
         phase=phase,
+        seed_mode="service-anchor",
+        route_seed_id_bag=None,
         internal_deadline_seconds=deadline,
         statement_timeout_seconds=120,
         run_dir=tmp_path / "run-test",
@@ -661,6 +663,49 @@ def test_seed_only_mode_does_not_run_graph_closure(tmp_path: Path) -> None:
         ]
         is False
     )
+
+
+def test_route_bag_seed_mode_uses_route_ids_without_service_anchor_scan(tmp_path: Path) -> None:
+    bag_path = tmp_path / "route_seed_id_bag.json"
+    bag_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"domain": "CONNPT_INT_ID", "value": "9908594"},
+                    {"domain": "DEVICE_CABPT_INT_ID", "value": "9908595"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = collector_args(tmp_path, phase="seed-only")
+    args.seed_mode = "route-bag"
+    args.route_seed_id_bag = bag_path
+    state = collector.initialize_run(args)
+    state.profiles = [column("SERVICE_ID", "VARCHAR", None)]
+    state.proof_by_object = {}
+
+    collector.phase_extract_service_seed_ids(FakeCursor(), state)
+
+    assert set(state.seed_scan.seed_nodes) == {
+        "PROD_ACCESS_DB.INCA_SRC|CONNPT_INT_ID|9908594",
+        "PROD_ACCESS_DB.INCA_SRC|GENERIC_INT_ID:DEVICE_CABPT_INT_ID|9908595",
+    }
+    assert state.seed_scan.searched_anchor_columns == 2
+    assert "SERVICE_ID" not in (state.run_dir / "command_log.sql").read_text()
+
+
+def test_route_bag_seed_mode_missing_bag_marks_seed_incomplete(tmp_path: Path) -> None:
+    args = collector_args(tmp_path, phase="seed-only")
+    args.seed_mode = "route-bag"
+    state = collector.initialize_run(args)
+
+    collector.phase_extract_service_seed_ids(FakeCursor(), state)
+    collector.phase_write_final_status(state)
+
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    assert state.seed_scan.incomplete_areas
+    assert statuses["IC-388612 ID extraction"]["status"] == INCOMPLETE
 
 
 def test_seed_anchor_profiles_are_deterministic_service_columns_only() -> None:

@@ -138,6 +138,8 @@ class LiveConfig:
     page_size: int
     max_pages_per_predicate: int
     phase_mode: str
+    seed_mode: str
+    route_seed_id_bag: Path | None
     internal_deadline_seconds: int
     statement_timeout_seconds: int
     framework_commit_sha: str
@@ -214,6 +216,13 @@ def parse_args() -> argparse.Namespace:
         help="Run full evidence, metadata-only smoke, or seed-only smoke.",
     )
     parser.add_argument(
+        "--seed-mode",
+        choices=("service-anchor", "route-bag", "service-anchor-plus-route-bag"),
+        default="service-anchor",
+        help="Choose IC seed source. route-bag uses a route-derived structured ID artifact.",
+    )
+    parser.add_argument("--route-seed-id-bag", type=Path, default=None)
+    parser.add_argument(
         "--internal-deadline-seconds",
         type=int,
         default=DEFAULT_INTERNAL_DEADLINE_SECONDS,
@@ -275,6 +284,8 @@ def initialize_run(args: argparse.Namespace) -> RunState:
         page_size=args.page_size,
         max_pages_per_predicate=args.max_pages_per_predicate,
         phase_mode=args.phase,
+        seed_mode=args.seed_mode,
+        route_seed_id_bag=Path(args.route_seed_id_bag) if args.route_seed_id_bag else None,
         internal_deadline_seconds=args.internal_deadline_seconds,
         statement_timeout_seconds=args.statement_timeout_seconds,
         framework_commit_sha=resolve_framework_commit(args.repo_root, args.framework_commit),
@@ -339,6 +350,10 @@ def initial_run_manifest(config: LiveConfig, run_dir: Path) -> dict[str, object]
         "sorter_changes_allowed": False,
         "port_match_rule_changes_allowed": False,
         "phase_mode": config.phase_mode,
+        "seed_mode": config.seed_mode,
+        "route_seed_id_bag": ""
+        if config.route_seed_id_bag is None
+        else str(config.route_seed_id_bag),
         "run_dir": str(run_dir),
         "started_at": utc_now(),
         "completed_at": "",
@@ -727,9 +742,15 @@ def phase_build_structured_id_dictionary(state: RunState) -> None:
 
 
 def phase_extract_service_seed_ids(cursor: object, state: RunState) -> None:
-    state.seed_scan = scan_ic_seed_nodes(
-        cursor, state.config, state.profiles, state.proof_by_object, state
-    )
+    seed_scan = empty_seed_scan()
+    if state.config.seed_mode in {"service-anchor", "service-anchor-plus-route-bag"}:
+        seed_scan = scan_ic_seed_nodes(
+            cursor, state.config, state.profiles, state.proof_by_object, state
+        )
+    if state.config.seed_mode in {"route-bag", "service-anchor-plus-route-bag"}:
+        route_seed_scan = load_route_seed_scan(state.config)
+        seed_scan = merge_seed_scans(seed_scan, route_seed_scan)
+    state.seed_scan = seed_scan
     write_json_artifact(
         state.run_dir / "ic388612_id_bag.json", id_bag_payload(state.config, state.seed_scan)
     )
@@ -1356,6 +1377,90 @@ def empty_seed_scan() -> SeedScanResult:
 
 def empty_graph_scan() -> GraphScanResult:
     return GraphScanResult([], [], [], [], [])
+
+
+def load_route_seed_scan(config: LiveConfig) -> SeedScanResult:
+    if config.route_seed_id_bag is None:
+        area = IncompleteArea(
+            object_name="ROUTE_SEED_ID_BAG",
+            column_name="",
+            id_node_key="",
+            expected_row_count=1,
+            fetched_row_count=0,
+            page_size=config.page_size,
+            attempted_mitigations=("provide --route-seed-id-bag",),
+            stop_reason="seed_mode route-bag requires --route-seed-id-bag",
+            resume_checkpoint="",
+        )
+        return SeedScanResult({}, [], 0, 0, [area], [])
+    payload = json_load_or_empty(config.route_seed_id_bag)
+    nodes = route_seed_nodes_from_payload(config, payload)
+    seed_rows = route_seed_rows(config, payload, nodes)
+    return SeedScanResult(nodes, seed_rows, len(seed_rows), len(seed_rows), [], [])
+
+
+def route_seed_nodes_from_payload(
+    config: LiveConfig, payload: dict[str, object]
+) -> dict[str, IdNode]:
+    nodes: dict[str, IdNode] = {}
+    raw_nodes = payload.get("nodes", [])
+    if not isinstance(raw_nodes, list):
+        return nodes
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        column_name = str(raw.get("domain", "")).strip()
+        value = str(raw.get("value", "")).strip()
+        if not column_name or not value:
+            continue
+        node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        nodes.setdefault(node.key, node)
+    return nodes
+
+
+def route_seed_rows(
+    config: LiveConfig, payload: dict[str, object], nodes: dict[str, IdNode]
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    raw_nodes = payload.get("nodes", [])
+    if not isinstance(raw_nodes, list):
+        return rows
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
+        column_name = str(raw.get("domain", "")).strip()
+        value = str(raw.get("value", "")).strip()
+        if not column_name or not value:
+            continue
+        node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        if node.key not in nodes:
+            continue
+        rows.append(
+            {
+                "run_id": config.run_id,
+                "service_id": config.service_id,
+                "object_name": "ROUTE_SEED_ID_BAG",
+                "anchor_column": column_name,
+                "match_count": 1,
+                "row_hash": stable_hash(node.key),
+                "query_id": "",
+                "page_number": 1,
+            }
+        )
+    return rows
+
+
+def merge_seed_scans(left: SeedScanResult, right: SeedScanResult) -> SeedScanResult:
+    nodes = dict(left.seed_nodes)
+    nodes.update(right.seed_nodes)
+    return SeedScanResult(
+        nodes,
+        [*left.seed_rows, *right.seed_rows],
+        left.searched_anchor_columns + right.searched_anchor_columns,
+        left.exact_anchor_hits + right.exact_anchor_hits,
+        [*left.incomplete_areas, *right.incomplete_areas],
+        [*left.skipped_rows, *right.skipped_rows],
+    )
 
 
 def utc_now() -> str:
