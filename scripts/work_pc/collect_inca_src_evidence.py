@@ -560,7 +560,10 @@ def run_phase(state: RunState, phase: str, action: Any) -> None:
             },
         )
         write_json_artifact(state.run_dir / "run_manifest.json", state.run_manifest)
-        write_checkpoint(state, phase)
+        if locals().get("status", INCOMPLETE) == PASS:
+            write_checkpoint(state, phase)
+        else:
+            mark_checkpoint_incomplete(state, phase, locals().get("reason", ""))
 
 
 def phase_initialize_run(cursor: object, args: argparse.Namespace, state: RunState) -> None:

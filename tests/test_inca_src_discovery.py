@@ -618,6 +618,37 @@ def test_deadline_check_preserves_existing_scan_checkpoint_context(tmp_path: Pat
     assert "internal deadline expired" in checkpoint["reason"]
 
 
+def test_run_phase_finalizer_preserves_checkpoint_context_after_timeout(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path, deadline=1500))
+    content = column("CONTENT_INT_ID")
+    node = node_from_value("PROD_ACCESS_DB", "INCA_SRC", "CONTENT_INT_ID", 123, "NUMBER")
+
+    def action() -> None:
+        collector.write_scan_checkpoint(
+            state,
+            "run_exact_id_overlap_scan",
+            content,
+            node,
+            10,
+            3,
+            {("RELATION_TABLE", "CONTENT_INT_ID", node.key)},
+            [node.key],
+        )
+        raise collector.InternalDeadlineExceededError("deadline")
+
+    with pytest.raises(collector.InternalDeadlineExceededError):
+        collector.run_phase(state, "run_exact_id_overlap_scan", action)
+
+    checkpoint = json.loads((state.run_dir / "checkpoint.json").read_text())
+
+    assert checkpoint["current_object"] == "RELATION_TABLE"
+    assert checkpoint["current_column"] == "CONTENT_INT_ID"
+    assert checkpoint["current_node_key"] == node.key
+    assert checkpoint["rows_expected"] == 10
+    assert checkpoint["rows_fetched"] == 3
+    assert checkpoint["reason"] == "deadline"
+
+
 def test_metadata_only_mode_does_not_run_exact_id_scan_or_graph_closure(
     tmp_path: Path,
 ) -> None:
