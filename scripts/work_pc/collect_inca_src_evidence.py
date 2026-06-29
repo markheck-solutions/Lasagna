@@ -1394,18 +1394,19 @@ def load_route_seed_scan(config: LiveConfig) -> SeedScanResult:
         )
         return SeedScanResult({}, [], 0, 0, [area], [])
     payload = json_load_or_empty(config.route_seed_id_bag)
-    nodes = route_seed_nodes_from_payload(config, payload)
+    nodes, skipped_rows = route_seed_nodes_from_payload(config, payload)
     seed_rows = route_seed_rows(config, payload, nodes)
-    return SeedScanResult(nodes, seed_rows, len(seed_rows), len(seed_rows), [], [])
+    return SeedScanResult(nodes, seed_rows, len(seed_rows), len(seed_rows), [], skipped_rows)
 
 
 def route_seed_nodes_from_payload(
     config: LiveConfig, payload: dict[str, object]
-) -> dict[str, IdNode]:
+) -> tuple[dict[str, IdNode], list[dict[str, object]]]:
     nodes: dict[str, IdNode] = {}
+    skipped_rows: list[dict[str, object]] = []
     raw_nodes = payload.get("nodes", [])
     if not isinstance(raw_nodes, list):
-        return nodes
+        return nodes, skipped_rows
     for raw in raw_nodes:
         if not isinstance(raw, dict):
             continue
@@ -1413,9 +1414,13 @@ def route_seed_nodes_from_payload(
         value = str(raw.get("value", "")).strip()
         if not column_name or not value:
             continue
-        node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        try:
+            node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        except ValueError as exc:
+            skipped_rows.append(route_seed_skipped_row(config, column_name, str(exc)))
+            continue
         nodes.setdefault(node.key, node)
-    return nodes
+    return nodes, skipped_rows
 
 
 def route_seed_rows(
@@ -1432,7 +1437,10 @@ def route_seed_rows(
         value = str(raw.get("value", "")).strip()
         if not column_name or not value:
             continue
-        node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        try:
+            node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
+        except ValueError:
+            continue
         if node.key not in nodes:
             continue
         rows.append(
@@ -1448,6 +1456,24 @@ def route_seed_rows(
             }
         )
     return rows
+
+
+def route_seed_skipped_row(
+    config: LiveConfig, column_name: str, reason_detail: str
+) -> dict[str, object]:
+    return {
+        "run_id": config.run_id,
+        "object_name": "ROUTE_SEED_ID_BAG",
+        "object_type": "ROUTE_SEED_ARTIFACT",
+        "column_name": column_name,
+        "skip_scope": "COLUMN",
+        "skip_reason_code": "ROUTE_SEED_FIELD_NOT_PROOF_GRADE",
+        "skip_reason_detail": reason_detail,
+        "required_for_full_discovery": False,
+        "causes_incomplete": False,
+        "mitigation_attempted": "field skipped before graph node creation",
+        "next_action": "add deterministic ID-domain rule only if this field is approved proof-grade",
+    }
 
 
 def merge_seed_scans(left: SeedScanResult, right: SeedScanResult) -> SeedScanResult:

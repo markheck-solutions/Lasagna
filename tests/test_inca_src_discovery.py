@@ -673,6 +673,7 @@ def test_route_bag_seed_mode_uses_route_ids_without_service_anchor_scan(tmp_path
                 "nodes": [
                     {"domain": "CONNPT_INT_ID", "value": "9908594"},
                     {"domain": "DEVICE_CABPT_INT_ID", "value": "9908595"},
+                    {"domain": "EDGE_POSITION_ID", "value": "19281419"},
                 ]
             }
         ),
@@ -692,6 +693,8 @@ def test_route_bag_seed_mode_uses_route_ids_without_service_anchor_scan(tmp_path
         "PROD_ACCESS_DB.INCA_SRC|GENERIC_INT_ID:DEVICE_CABPT_INT_ID|9908595",
     }
     assert state.seed_scan.searched_anchor_columns == 2
+    assert state.seed_scan.skipped_rows[0]["column_name"] == "EDGE_POSITION_ID"
+    assert state.seed_scan.skipped_rows[0]["causes_incomplete"] is False
     assert "SERVICE_ID" not in (state.run_dir / "command_log.sql").read_text()
 
 
