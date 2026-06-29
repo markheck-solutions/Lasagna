@@ -34,6 +34,30 @@ ROUTER_PATTERNS = [
     "7280",
     "8201",
 ]
+_ROUTER_FUNCTION_PREFIXES = (
+    "NCS-",
+    "8201",
+    "8212",
+    "7280",
+    "ASR-",
+    "DCS-",
+    "ALU ",
+    "C1111",
+    "C1121",
+    "892",
+    "1841",
+    "1921",
+    "1941",
+    "2921",
+    "4500",
+    "4900",
+    "NCS 5",
+    "NCS 54",
+    "R660",
+    "TI-PG",
+    "EX3400",
+    "EX4600",
+)
 
 # Phase 2B: Data-driven device classification sets.
 # NE_TYPEs confirmed as transmission (DWDM/WDM/optical transport).
@@ -225,30 +249,7 @@ class InCARow:
             if upper.startswith("ROUTER") or upper.startswith("SWITCH"):
                 return True
             # Known router model prefixes in NE_FUNCTION
-            for prefix in (
-                "NCS-",
-                "8201",
-                "8212",
-                "7280",
-                "ASR-",
-                "DCS-",
-                "ALU ",
-                "C1111",
-                "C1121",
-                "892",
-                "1841",
-                "1921",
-                "1941",
-                "2921",
-                "4500",
-                "4900",
-                "NCS 5",
-                "NCS 54",
-                "R660",
-                "TI-PG",
-                "EX3400",
-                "EX4600",
-            ):
+            for prefix in _ROUTER_FUNCTION_PREFIXES:
                 if prefix in upper:
                     return True
             return False
