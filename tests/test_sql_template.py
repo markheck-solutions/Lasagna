@@ -125,7 +125,7 @@ def test_transport_device_adjacency_uses_recursive_ccp_endpoint_facts() -> None:
     assert "shared_handoff_unambiguous_edges AS" not in template
     assert "RAW_ENDPOINT_SITE_COUNT" not in template
     assert "endpoint_row_count = 2" in template
-    assert "endpoint_site_count = 2" in template
+    assert "endpoint_site_count IN (1, 2)" in template
     assert "TRANSPORT_DEVICE_ADJACENCY" in template
     assert "ENDPOINT_PROOF_SOURCE" in template
     assert "PORT_MATCH_RULE" in template
@@ -155,7 +155,18 @@ def test_dwdm_adjacency_requires_cabling_backed_dtn_not_fanout() -> None:
     assert "peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID" in template
     assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
     assert "endpoint_row_count = 2" in template
-    assert "endpoint_site_count = 2" in template
+    assert "endpoint_site_count IN (1, 2)" in template
+
+
+def test_transport_device_adjacency_preserves_same_site_two_endpoint_proof() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+    ranked_block = template.split("ranked_endpoints AS", 1)[1].split("candidate_pairs AS", 1)[0]
+
+    assert "candidate_site_counts.endpoint_site_count IN (1, 2)" in ranked_block
+    assert "candidate_site_counts.endpoint_row_count = 2" in ranked_block
+    assert "candidate_site_counts.duplicate_endpoint_count = 0" in ranked_block
+    assert "candidate_site_counts.null_endpoint_count = 0" in ranked_block
+    assert "candidate_site_counts.endpoint_site_count = 2" not in ranked_block
 
 
 def test_dp_sdp_rows_use_normalized_service_id_key() -> None:

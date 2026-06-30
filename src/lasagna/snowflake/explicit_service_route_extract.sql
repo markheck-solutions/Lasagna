@@ -1157,7 +1157,7 @@ ranked_endpoints AS (
         AND candidate_site_counts.edge_name = candidate_endpoint_sites.edge_name
         AND candidate_site_counts.port_match_rule = candidate_endpoint_sites.port_match_rule
         AND candidate_site_counts.endpoint_proof_source = candidate_endpoint_sites.endpoint_proof_source
-        AND candidate_site_counts.endpoint_site_count = 2
+        AND candidate_site_counts.endpoint_site_count IN (1, 2)
         AND candidate_site_counts.endpoint_row_count = 2
         AND candidate_site_counts.duplicate_endpoint_count = 0
         AND candidate_site_counts.null_endpoint_count = 0
