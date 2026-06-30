@@ -201,6 +201,9 @@ FAIL_CLOSED_MESSAGE_FRAGMENTS = (
     "duplicate",
     "collapsed edge lacks explicit side proof",
     "migration route contract not proven",
+    "transport adjacency path not uniquely proven",
+    "transport adjacency path not proven",
+    "device transport endpoint not proven",
 )
 
 

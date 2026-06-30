@@ -108,6 +108,30 @@ def test_full_route_verifier_allows_explicit_fail_closed_service(tmp_path: Path)
     assert result["verifier_failures"] == []
 
 
+def test_full_route_verifier_allows_expected_transport_fail_closed_service(
+    tmp_path: Path,
+) -> None:
+    parsed_inputs = parse_service_id_text("IC-123456")
+    service_results = {
+        "IC-123456": ServiceRouteResult.sort_failed(
+            "IC-123456",
+            "transport adjacency path not proven for row site(s): MID",
+        )
+    }
+    [write_result] = write_route_workbooks(parsed_inputs, service_results, tmp_path)
+    expected = capture_expectations(write_result.path)
+    expected_path = tmp_path / "expected.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+
+    result = verify_workbook(
+        write_result.path, _combined_csv(tmp_path / "combined.csv"), expected_path
+    )
+
+    assert result["status"] == "OK"
+    assert result["services"][0]["workbook_status"] == "SORT FAILED"
+    assert result["services"][0]["actual_row_count"] == 0
+
+
 def test_full_route_verifier_does_not_stop_on_blank_location_id(tmp_path: Path) -> None:
     parsed_inputs = parse_service_id_text("IC-123456")
     service_results = {
