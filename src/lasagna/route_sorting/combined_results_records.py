@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from lasagna.route_sorting.combined_results_models import (
+    TRUSTED_DP_ENDPOINT_ROLE_PROOF_SOURCES,
     TRUSTED_TRANSPORT_DEVICE_PROOF_SOURCE,
     TRUSTED_TRANSPORT_PORT_MATCH_RULES,
     DpEndpointRole,
@@ -269,8 +270,14 @@ def _service_transport_adjacencies(
 def _dp_endpoint_role_from_record(record: dict[str, Any]) -> DpEndpointRole:
     matched_route_path = _text(record.get("MATCHED_ROUTE_PATH"))
     matched_site_side = _text(record.get("MATCHED_SITE_SIDE")).upper()
+    endpoint_proof_source = _text(record.get("ENDPOINT_PROOF_SOURCE"))
     if not matched_route_path or matched_site_side not in {"A", "B"}:
         raise StructuredRouteContractError("missing matched route path or side in DP_ENDPOINT_ROLE")
+    if endpoint_proof_source not in TRUSTED_DP_ENDPOINT_ROLE_PROOF_SOURCES:
+        raise StructuredRouteContractError(
+            "untrusted DP_ENDPOINT_ROLE proof source for "
+            f"{matched_route_path}: {endpoint_proof_source or '<blank>'}"
+        )
     return DpEndpointRole(
         dp_route_path=_text(record.get("DP_ROUTE_PATH")),
         site_code=_text(record.get("SITE_CODE")),
@@ -281,7 +288,7 @@ def _dp_endpoint_role_from_record(record: dict[str, Any]) -> DpEndpointRole:
         conn_type=_text(record.get("CONN_TYPE")),
         matched_route_path=matched_route_path,
         matched_site_side=matched_site_side,
-        endpoint_proof_source=_text(record.get("ENDPOINT_PROOF_SOURCE")),
+        endpoint_proof_source=endpoint_proof_source,
     )
 
 

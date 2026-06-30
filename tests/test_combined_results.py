@@ -1773,6 +1773,46 @@ def test_structured_contract_sorts_icb_823422_transport_backed_dp_role() -> None
     assert result[-1].route_path == dp_route
 
 
+@pytest.mark.parametrize(
+    "endpoint_proof_source",
+    ("", "UNKNOWN_DP_ENDPOINT_ROLE_SOURCE"),
+)
+def test_structured_contract_rejects_untrusted_dp_endpoint_role_source(
+    endpoint_proof_source: str,
+) -> None:
+    service_id = "IC-123456"
+    bearer = "AAA-BBB 100G01"
+    dp_route = "Demarcation point: AAA XS"
+    dp_row = _row("AAA", dp_route, 1, ne_info="DP ODF")
+    dp_row.cabling_points = "1"
+    dp_row.conn_type = "LC"
+
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="untrusted DP_ENDPOINT_ROLE proof source",
+    ):
+        _sort_rows_by_structured_contract(
+            [dp_row],
+            [_metadata_between(service_id, bearer, 1, "AAA", "BBB") | {"MEDIA": "ET"}],
+            service_id,
+            dp_endpoint_roles=[
+                _dp_endpoint_role(
+                    service_id,
+                    dp_route,
+                    "AAA",
+                    "XS",
+                    "",
+                    1,
+                    "1",
+                    "LC",
+                    bearer,
+                    "A",
+                    endpoint_proof_source=endpoint_proof_source,
+                )
+            ],
+        )
+
+
 def test_structured_contract_skips_transport_path_for_dp_only_route() -> None:
     service_id = "IC-123456"
     bearer = "AAA-BBB 100G01"

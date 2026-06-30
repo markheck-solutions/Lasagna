@@ -14,6 +14,12 @@ TRUSTED_TRANSPORT_PORT_MATCH_RULES = frozenset(
         "CABLING_POINT_TO_PEER_CABLING_POINT",
     }
 )
+TRUSTED_DP_ENDPOINT_ROLE_PROOF_SOURCES = frozenset(
+    {
+        "DP_EXACT_SITE_IDENTITY",
+        "DP_SITE_CODE_TRANSPORT_ENDPOINT",
+    }
+)
 
 
 class StructuredRouteContractError(ValueError):
