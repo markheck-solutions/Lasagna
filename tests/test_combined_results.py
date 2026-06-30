@@ -1813,6 +1813,51 @@ def test_structured_contract_rejects_untrusted_dp_endpoint_role_source(
         )
 
 
+def test_structured_contract_keeps_same_site_transport_endpoint_in_graph() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA-AAA LOOP01"
+    endpoint_a = _row(
+        "AAA",
+        bearer,
+        1,
+        ne_info="AAA XS NODE1 01",
+        slot="01",
+        subslot="01",
+    )
+    endpoint_b = _row(
+        "AAA",
+        bearer,
+        2,
+        ne_info="AAA XS NODE2 02",
+        slot="02",
+        subslot="02",
+    )
+
+    result = _sort_rows_by_structured_contract(
+        [endpoint_b, endpoint_a],
+        [_metadata_between(service_id, bearer, 1, "AAA", "AAA") | {"MEDIA": "OL"}],
+        service_id,
+        [
+            _transport_adjacency(
+                service_id,
+                bearer,
+                "AAA",
+                "AAA",
+                endpoint_1_ne="AAA XS NODE1",
+                endpoint_1_ne_part="01",
+                endpoint_1_connection_point_nr="01",
+                endpoint_1_slot="01",
+                endpoint_2_ne="AAA XS NODE2",
+                endpoint_2_ne_part="02",
+                endpoint_2_connection_point_nr="02",
+                endpoint_2_slot="02",
+            )
+        ],
+    )
+
+    assert result == [endpoint_a, endpoint_b]
+
+
 def test_structured_contract_skips_transport_path_for_dp_only_route() -> None:
     service_id = "IC-123456"
     bearer = "AAA-BBB 100G01"

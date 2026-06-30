@@ -612,7 +612,10 @@ def _add_site_graph_edge(
     b_site: str,
     proof_cost: int = 0,
 ) -> None:
-    if not a_site or not b_site or a_site == b_site:
+    if not a_site or not b_site:
+        return
+    if a_site == b_site:
+        graph.setdefault(a_site, {})
         return
     graph.setdefault(a_site, {})
     graph.setdefault(b_site, {})
