@@ -126,6 +126,43 @@ def test_full_route_verifier_does_not_stop_on_blank_location_id(tmp_path: Path) 
     assert len(expected["services"]["IC-123456"]["rows"]) == 2
 
 
+def test_full_route_verifier_compares_migration_rows(tmp_path: Path) -> None:
+    parsed_inputs = parse_service_id_text("IC-123456")
+    expected_results = {
+        "IC-123456": ServiceRouteResult.ok(
+            "IC-123456",
+            (_route_row("AAA", "AAA-BBB OL01", "1"),),
+            (_route_row("CCC", "CCC-DDD OL02", "2"),),
+            route_order_source=ROUTE_ORDER_AUTHORITY,
+        )
+    }
+    [expected_workbook] = write_route_workbooks(
+        parsed_inputs, expected_results, tmp_path / "expected"
+    )
+    expected = capture_expectations(expected_workbook.path)
+    assert len(expected["services"]["IC-123456"]["rows"]) == 2
+
+    expected_path = tmp_path / "expected.json"
+    expected_path.write_text(json.dumps(expected), encoding="utf-8")
+
+    actual_results = {
+        "IC-123456": ServiceRouteResult.ok(
+            "IC-123456",
+            (_route_row("AAA", "AAA-BBB OL01", "1"),),
+            route_order_source=ROUTE_ORDER_AUTHORITY,
+        )
+    }
+    [actual_workbook] = write_route_workbooks(parsed_inputs, actual_results, tmp_path / "actual")
+
+    result = verify_workbook(
+        actual_workbook.path, _combined_csv(tmp_path / "combined.csv"), expected_path
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["services"][0]["expected_row_count"] == 2
+    assert result["services"][0]["actual_row_count"] == 1
+
+
 def test_full_route_verifier_rejects_new_fail_closed_for_expected_good_service(
     tmp_path: Path,
 ) -> None:

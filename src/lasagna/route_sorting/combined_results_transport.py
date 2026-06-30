@@ -543,14 +543,14 @@ def _find_unique_path_covering_sites(
     start_site: str = "",
     end_site: str = "",
 ) -> list[str]:
-    if len(required_sites) <= 1:
-        return sorted(required_sites)
-
     graph_sites = set(graph)
     if missing_sites := sorted(required_sites - graph_sites):
         raise StructuredRouteContractError(
             f"transport adjacency path not proven for row site(s): {', '.join(missing_sites)}"
         )
+
+    if len(required_sites) <= 1:
+        return sorted(required_sites)
 
     if start_site and end_site and start_site in graph and end_site in graph:
         directed_path = _unique_minimum_cost_path(

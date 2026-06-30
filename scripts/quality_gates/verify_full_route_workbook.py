@@ -100,44 +100,55 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
         if service_id not in workbook.sheetnames:
             return []
         sheet = workbook[service_id]
-        header_row = None
-        for row_number in range(1, sheet.max_row + 1):
-            values = [sheet.cell(row=row_number, column=column).value for column in range(1, 19)]
-            if tuple(values) == ROUTE_HEADERS:
-                header_row = row_number
-                break
-        if header_row is None:
-            return []
-
         rows: list[dict[str, Any]] = []
-        for row_number in range(header_row + 1, sheet.max_row + 1):
-            route_values: dict[str, object] = {
-                header: sheet.cell(row=row_number, column=column).value
-                for column, header in enumerate(ROUTE_HEADERS, start=1)
-            }
-            if _is_route_section_terminator(route_values):
-                break
-            rows.append(
-                {
-                    "service_id": service_id,
-                    "site_code": _text(route_values["Site Code"]),
-                    "site_type": _text(route_values["Site Type"]),
-                    "site_type_no": _text(route_values["Site Type No"]),
-                    "route_path": _text(route_values["Route Path"]),
-                    "pos": _text(route_values["Pos"]),
-                    "ne_info": _text(route_values["NE Information"]),
-                    "cabling_location": _text(route_values["Cabling Location"]),
-                    "cabling_points": _text(route_values["Cabling Points"]),
-                    "connection_type": _text(route_values["Conn Type"]),
-                }
-            )
+        row_number = 1
+        while row_number <= sheet.max_row:
+            values = [sheet.cell(row=row_number, column=column).value for column in range(1, 19)]
+            if tuple(values) != ROUTE_HEADERS:
+                row_number += 1
+                continue
+            row_number = _append_route_section_rows(sheet, row_number + 1, rows, service_id)
         return rows
     finally:
         workbook.close()
 
 
+def _append_route_section_rows(
+    sheet: Any,
+    row_number: int,
+    rows: list[dict[str, Any]],
+    service_id: str,
+) -> int:
+    while row_number <= sheet.max_row:
+        values = [sheet.cell(row=row_number, column=column).value for column in range(1, 19)]
+        if tuple(values) == ROUTE_HEADERS:
+            return row_number
+        route_values: dict[str, object] = {
+            header: sheet.cell(row=row_number, column=column).value
+            for column, header in enumerate(ROUTE_HEADERS, start=1)
+        }
+        if _is_route_section_terminator(route_values):
+            return row_number + 1
+        rows.append(
+            {
+                "service_id": service_id,
+                "site_code": _text(route_values["Site Code"]),
+                "site_type": _text(route_values["Site Type"]),
+                "site_type_no": _text(route_values["Site Type No"]),
+                "route_path": _text(route_values["Route Path"]),
+                "pos": _text(route_values["Pos"]),
+                "ne_info": _text(route_values["NE Information"]),
+                "cabling_location": _text(route_values["Cabling Location"]),
+                "cabling_points": _text(route_values["Cabling Points"]),
+                "connection_type": _text(route_values["Conn Type"]),
+            }
+        )
+        row_number += 1
+    return row_number
+
+
 def _is_route_section_terminator(route_values: dict[str, object]) -> bool:
-    marker_values = {"No route rows found.", "Migration Portion"}
+    marker_values = {"No route rows found.", "No migration portion found."}
     if any(value in marker_values for value in route_values.values()):
         return True
     return all(value in (None, "") for value in route_values.values())

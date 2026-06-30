@@ -835,6 +835,22 @@ def test_structured_contract_allows_single_identity_through_device_on_two_edges(
     assert [row.site_code for row in result] == ["AAA", "MID", "BBB"]
 
 
+def test_structured_contract_fails_single_unproven_transport_site() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA X 1-BBB X 2 100G01"
+
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="transport adjacency path not proven for row site\\(s\\): MID",
+    ):
+        _sort_rows_by_structured_contract(
+            [_row("MID", bearer, 1, ne_info="MID XS WS 05 WS5")],
+            [_metadata_between(service_id, bearer, 1, "AAA", "BBB") | {"MEDIA": "ET"}],
+            service_id,
+            [_transport_adjacency(service_id, bearer, "AAA", "BBB")],
+        )
+
+
 def test_structured_contract_keeps_bearer_rows_before_same_site_local_edges() -> None:
     service_id = "IC-123456"
     bearer = "AAA X 1-BBB X 2 100G01"
