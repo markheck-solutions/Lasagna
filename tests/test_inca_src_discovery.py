@@ -504,11 +504,21 @@ def test_run_manifest_includes_framework_commit_schema_contracts_and_constraints
     assert manifest["hard_constraints"]["sorter_changes_allowed"] is False
     assert manifest["hard_constraints"]["port_match_rule_changes_allowed"] is False
     assert manifest["negative_evidence_allowed"] is False
-    assert manifest["runbook_path"].endswith("docs\\runbooks\\INCA_SRC_EVIDENCE_FRAMEWORK.md")
-    assert manifest["status_contract_path"].endswith(
-        "docs\\contracts\\INCA_SRC_EVIDENCE_STATUS_CONTRACT.md"
+    assert (
+        manifest["runbook_path"]
+        .replace("\\", "/")
+        .endswith("docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md")
     )
-    assert manifest["handoff_path"].endswith("docs\\ai_handoffs\\INCA_SRC_EVIDENCE_HANDOFF.md")
+    assert (
+        manifest["status_contract_path"]
+        .replace("\\", "/")
+        .endswith("docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md")
+    )
+    assert (
+        manifest["handoff_path"]
+        .replace("\\", "/")
+        .endswith("docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md")
+    )
     assert manifest["bounded_json_snapshots"] is False
     assert manifest["probe_sample_row_limit"] == 5
     assert manifest["probe_deep_fetch_row_limit"] == 2500
