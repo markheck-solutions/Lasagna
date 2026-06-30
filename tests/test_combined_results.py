@@ -399,6 +399,37 @@ def test_structured_contract_sorts_planned_disco_from_transport_adjacency_path()
     assert [row.site_code for row in result] == device_site_path
 
 
+def test_structured_contract_preserves_bearer_a_to_b_transport_direction() -> None:
+    service_id = "IC-123456"
+    bearer = "ZZZ-AAA 100G01"
+    left = "ZZZ-MID OTUC01"
+    right = "MID-AAA OTUC02"
+    metadata = [
+        _metadata_between(service_id, bearer, 1, "ZZZ", "AAA"),
+        _metadata_between(service_id, left, 2, "ZZZ", "MID"),
+        _metadata_between(service_id, right, 3, "MID", "AAA"),
+    ]
+    transport_adjacency = [
+        _transport_adjacency(service_id, bearer, "ZZZ", "AAA"),
+        _transport_adjacency(service_id, left, "ZZZ", "MID"),
+        _transport_adjacency(service_id, right, "MID", "AAA"),
+    ]
+    rows = [
+        _row("AAA", bearer, 1, ne_info="AAA XS TM 01", status_t_time="Planned"),
+        _row("MID", bearer, 1, ne_info="MID XS TM 01", status_t_time="Planned"),
+        _row("ZZZ", bearer, 1, ne_info="ZZZ XS TM 01", status_t_time="Planned"),
+    ]
+
+    result = _sort_rows_by_structured_contract(
+        rows,
+        metadata,
+        service_id,
+        transport_adjacency,
+    )
+
+    assert [row.site_code for row in result] == ["ZZZ", "MID", "AAA"]
+
+
 def test_structured_contract_orders_ic_388612_palo_handoff_from_transport_adjacency() -> None:
     service_id = "IC-388612"
     bearer = "ASH/R1 X 21-SCR/CS X 28 100G01"

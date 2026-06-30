@@ -111,13 +111,12 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
 
         rows: list[dict[str, Any]] = []
         for row_number in range(header_row + 1, sheet.max_row + 1):
-            first_cell = sheet.cell(row=row_number, column=1).value
-            if first_cell in (None, "", "No route rows found.", "Migration Portion"):
-                break
             route_values: dict[str, object] = {
                 header: sheet.cell(row=row_number, column=column).value
                 for column, header in enumerate(ROUTE_HEADERS, start=1)
             }
+            if _is_route_section_terminator(route_values):
+                break
             rows.append(
                 {
                     "service_id": service_id,
@@ -135,6 +134,13 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
         return rows
     finally:
         workbook.close()
+
+
+def _is_route_section_terminator(route_values: dict[str, object]) -> bool:
+    marker_values = {"No route rows found.", "Migration Portion"}
+    if any(value in marker_values for value in route_values.values()):
+        return True
+    return all(value in (None, "") for value in route_values.values())
 
 
 def _expected_rows(expected_service: dict[str, Any], service_id: str) -> list[dict[str, Any]]:
@@ -187,7 +193,13 @@ FAIL_CLOSED_MESSAGE_FRAGMENTS = (
 )
 
 
-def _is_valid_fail_closed(summary_row: dict[str, Any], actual_rows: list[dict[str, Any]]) -> bool:
+def _is_valid_fail_closed(
+    expected_service: dict[str, Any],
+    summary_row: dict[str, Any],
+    actual_rows: list[dict[str, Any]],
+) -> bool:
+    if expected_service.get("status") != "SORT FAILED":
+        return False
     if summary_row.get("status") != "SORT FAILED":
         return False
     if actual_rows:
@@ -235,7 +247,9 @@ def verify_workbook(
             and summary_row.get("status") == "OK"
             and summary_row.get("route_order_source") == "STRUCTURED_ROUTE_CONTRACT"
         )
-        valid_fail_closed = _is_valid_fail_closed(summary_row, actual_service_rows)
+        valid_fail_closed = _is_valid_fail_closed(
+            expected_service, summary_row, actual_service_rows
+        )
         service_status = "OK" if valid_ok or valid_fail_closed else "FAIL"
         service_report = {
             "service_id": service_id,

@@ -3,9 +3,9 @@
 # ruff: noqa: F401,F403,F405,I001
 from __future__ import annotations
 
-from .inca_evidence_collector_context import *  # noqa: F403
-
 from typing import TYPE_CHECKING
+
+from .inca_evidence_collector_context import *  # noqa: F403
 
 if TYPE_CHECKING:
     from .inca_evidence_collector_artifacts import (
@@ -15,32 +15,41 @@ if TYPE_CHECKING:
         evidence_edge_rows,
         id_bag_payload,
         join_paths_payload,
-        readme_text,
         registry_csv_rows,
-        run_hashes,
+    )
+    from .inca_evidence_collector_fileio import (
+        empty_seed_scan,
+        load_route_seed_scan,
+        merge_seed_scans,
+        utc_now,
+        write_jsonl_artifact,
+        write_profile_snapshots,
     )
     from .inca_evidence_collector_live import (
         apply_session_controls,
+        collect_live_artifacts,
         connect_with_connection_name,
         proof_columns_by_object,
         scan_evidence_graph,
         scan_ic_seed_nodes,
     )
+    from .inca_evidence_collector_probe_snapshots import collect_predicate_probe_snapshots
+    from .inca_evidence_collector_semantic_fetch import collect_dwdm_adjacency_proofs
+    from .inca_evidence_collector_semantic_results import (
+        dtn_semantic_probe_payload,
+        dwdm_adjacency_decision_matrix,
+        dwdm_adjacency_service_summary,
+        dwdm_predicate_probe_snapshots,
+    )
     from .inca_evidence_collector_state import (
         append_csv_row,
         check_deadline,
-        empty_seed_scan,
         execute_observed_rows,
-        load_route_seed_scan,
         mark_checkpoint_incomplete,
-        merge_seed_scans,
         phase_artifact_paths,
+        phase_write_final_status,
         refresh_run_manifest_counts,
-        should_write_negative_ledger,
-        status_payload_for_state,
-        utc_now,
         write_checkpoint,
-        write_negative_ledger,
         write_progress_summary,
     )
 
@@ -77,11 +86,23 @@ def run_collector_phases(args: argparse.Namespace, state: RunState) -> RunState:
                 "build_structured_id_dictionary",
                 lambda: phase_build_structured_id_dictionary(state),
             )
-            if args.phase in {"seed-only", "full"}:
+            if args.phase in {"seed-only", "probe-only", "snapshot-only", "semantic-probe", "full"}:
                 run_phase(
                     state,
                     "extract_service_seed_ids",
                     lambda: phase_extract_service_seed_ids(cursor, state),
+                )
+            if args.phase in {"probe-only", "snapshot-only", "semantic-probe"}:
+                run_phase(
+                    state,
+                    "write_probe_snapshots",
+                    lambda: phase_write_probe_snapshots(cursor, state),
+                )
+            if args.phase == "semantic-probe":
+                run_phase(
+                    state,
+                    "write_dtn_semantic_probe",
+                    lambda: phase_write_dtn_semantic_probe(cursor, state),
                 )
             if args.phase == "full":
                 run_phase(
@@ -305,6 +326,7 @@ def phase_write_schema_profile(state: RunState) -> None:
         csv_headers(state.metadata.get("columns", [])),
         state.metadata.get("columns", []),
     )
+    write_profile_snapshots(state)
     refresh_run_manifest_counts(state)
 
 
@@ -411,26 +433,47 @@ def phase_run_graph_closure(state: RunState) -> None:
     )
 
 
-def phase_write_final_status(state: RunState) -> None:
-    statuses = status_payload_for_state(state)
-    state.status_split = statuses
-    hashes = run_hashes(
-        state.metadata.get("tables", []),
-        state.metadata.get("columns", []),
-        state.dictionary_rows,
-        state.graph_scan.coverage_rows,
-        registry_csv_rows(state.graph_scan.evidence_rows),
-    )
-    write_json_artifact(state.run_dir / "status_split.json", statuses)
+def phase_write_probe_snapshots(cursor: object, state: RunState) -> None:
+    snapshots = collect_predicate_probe_snapshots(cursor, state)
+    write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", snapshots)
     write_json_artifact(
-        state.run_dir / "schema_drift_invalidation_report.json", schema_drift_report({}, hashes)
+        state.run_dir / "probe_decision_matrix.json",
+        decision_matrix_payload(state.config.run_id, snapshots),
     )
-    write_json_artifact(state.run_dir / "golden_blocker_corpus.json", {"cases": []})
-    write_json_artifact(state.run_dir / "golden_blocker_results.json", {"status": INCOMPLETE})
-    if should_write_negative_ledger(state):
-        write_negative_ledger(state, hashes, statuses)
-    state.run_manifest["negative_evidence_allowed"] = should_write_negative_ledger(state)
-    state.run_manifest["run_status"] = PASS if state.config.phase_mode != "full" else INCOMPLETE
-    state.run_manifest["completed_at"] = utc_now()
-    refresh_run_manifest_counts(state)
-    (state.run_dir / "README.md").write_text(readme_text(state.config.service_id), encoding="utf-8")
+    write_progress_summary(
+        state,
+        "write_probe_snapshots",
+        reason=f"predicate_probe_count={len(snapshots)}",
+    )
+
+
+def phase_write_dtn_semantic_probe(cursor: object, state: RunState) -> None:
+    probes = collect_dwdm_adjacency_proofs(cursor, state)
+    probe = probes[0] if probes else dtn_semantic_probe_payload(state, {}, {}, [], [], [])
+    state.semantic_probe = {"services": probes} if len(probes) > 1 else probe
+    snapshot = cast("Mapping[str, object]", probe["snapshot"])
+    classification = cast("Mapping[str, object]", probe["classification"])
+    service_summary = dwdm_adjacency_service_summary(state, probes)
+    dwdm_matrix = dwdm_adjacency_decision_matrix(state, service_summary)
+    predicate_snapshots = dwdm_predicate_probe_snapshots(state, service_summary)
+    write_json_artifact(
+        state.run_dir / "dtn_semantic_probe_snapshot.json",
+        snapshot,
+    )
+    write_json_artifact(
+        state.run_dir / "dtn_relation_classification.json",
+        classification,
+    )
+    write_json_artifact(state.run_dir / "dwdm_adjacency_service_summary.json", service_summary)
+    write_json_artifact(state.run_dir / "dwdm_adjacency_decision_matrix.json", dwdm_matrix)
+    write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", predicate_snapshots)
+    write_json_artifact(
+        state.run_dir / "probe_decision_matrix.json",
+        decision_matrix_payload(state.config.run_id, predicate_snapshots),
+    )
+    counts = classification.get("counts", {})
+    write_progress_summary(
+        state,
+        "write_dtn_semantic_probe",
+        reason=f"dtn_candidate_counts={json.dumps(counts, sort_keys=True)}",
+    )

@@ -3,12 +3,155 @@
 # ruff: noqa: F401,F403,F405,I001
 from __future__ import annotations
 
-from .inca_evidence_collector_context import *  # noqa: F403
-
 from typing import TYPE_CHECKING
 
+from .inca_evidence_collector_context import *  # noqa: F403
+
 if TYPE_CHECKING:
-    pass
+    from .inca_evidence_collector_state import check_deadline, execute_observed_rows
+
+
+def execute_rows(
+    cursor: object,
+    sql_text: str,
+    params: tuple[object, ...],
+    state: RunState | None = None,
+    phase: str = "",
+    logical_query_name: str = "",
+) -> QueryRows:
+    if state is not None:
+        return execute_observed_rows(
+            state,
+            cursor,
+            sql_text,
+            params,
+            phase or "unknown",
+            logical_query_name or "query",
+        )
+    execute = getattr(cursor, "execute")
+    execute(sql_text, params)
+    description = getattr(cursor, "description")
+    names = [column[0] for column in description]
+    fetched = getattr(cursor, "fetchall")()
+    rows = [dict(zip(names, row, strict=False)) for row in fetched]
+    return QueryRows(rows=rows, query_id=str(getattr(cursor, "sfqid", "")))
+
+
+def execute_count(
+    cursor: object,
+    sql_text: str,
+    params: tuple[object, ...],
+    state: RunState | None = None,
+    phase: str = "",
+    logical_query_name: str = "",
+) -> tuple[int, str]:
+    result = execute_rows(cursor, sql_text, params, state, phase, logical_query_name)
+    if not result.rows:
+        return 0, result.query_id
+    first = result.rows[0]
+    return int(str(first.get("MATCH_COUNT", 0))), result.query_id
+
+
+def build_anchor_count_sql(config: LiveConfig, anchor: ColumnProfile) -> str:
+    return (
+        "SELECT COUNT(*) AS MATCH_COUNT "
+        f"FROM {qualified_object(config.database, config.schema, anchor.object_name)} "
+        f"WHERE {quote_identifier(anchor.column_name)} = %s"
+    )
+
+
+def build_anchor_fetch_sql(
+    config: LiveConfig,
+    anchor: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+) -> str:
+    selected = selected_columns([anchor, *proof_columns])
+    row_hash = row_hash_expression(selected)
+    return (
+        f"SELECT {quoted_select_list(selected)}, {row_hash} AS ROW_HASH "
+        f"FROM {qualified_object(config.database, config.schema, anchor.object_name)} "
+        f"WHERE {quote_identifier(anchor.column_name)} = %s "
+        "ORDER BY ROW_HASH "
+        "LIMIT %s OFFSET %s"
+    )
+
+
+def build_exact_fetch_sql(
+    config: LiveConfig,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+) -> str:
+    selected = selected_columns(proof_columns)
+    row_hash = row_hash_expression(selected)
+    return (
+        f"SELECT {quoted_select_list(selected)}, {row_hash} AS ROW_HASH "
+        f"FROM {qualified_object(config.database, config.schema, predicate_column.object_name)} "
+        f"WHERE {quote_identifier(predicate_column.column_name)} = %s "
+        "ORDER BY ROW_HASH "
+        "LIMIT %s OFFSET %s"
+    )
+
+
+def fetch_anchor_pages(
+    cursor: object,
+    config: LiveConfig,
+    anchor: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    pages: int,
+    state: RunState | None = None,
+) -> list[tuple[int, dict[str, object]]]:
+    sql_text = build_anchor_fetch_sql(config, anchor, proof_columns)
+    rows: list[tuple[int, dict[str, object]]] = []
+    for page_number in range(1, pages + 1):
+        if state is not None:
+            check_deadline(state, "extract_service_seed_ids", f"anchor page {page_number}")
+        offset = (page_number - 1) * config.page_size
+        result = execute_rows(
+            cursor,
+            sql_text,
+            (config.service_id, config.page_size, offset),
+            state,
+            "extract_service_seed_ids",
+            "anchor_fetch_page",
+        )
+        rows.extend((page_number, row) for row in result.rows)
+    return rows
+
+
+def fetch_exact_pages(
+    cursor: object,
+    config: LiveConfig,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    node: IdNode,
+    pages: int,
+    state: RunState | None = None,
+) -> list[tuple[int, dict[str, object]]]:
+    sql_text = build_exact_fetch_sql(config, predicate_column, proof_columns)
+    rows: list[tuple[int, dict[str, object]]] = []
+    for page_number in range(1, pages + 1):
+        if state is not None:
+            check_deadline(state, "run_exact_id_overlap_scan", f"exact page {page_number}")
+        offset = (page_number - 1) * config.page_size
+        params = (predicate_value(node, predicate_column), config.page_size, offset)
+        result = execute_rows(
+            cursor,
+            sql_text,
+            params,
+            state,
+            "run_exact_id_overlap_scan",
+            "exact_fetch_page",
+        )
+        rows.extend((page_number, row) for row in result.rows)
+    return rows
+
+
+def selected_columns(profiles: list[ColumnProfile]) -> list[str]:
+    names = sorted({profile.column_name for profile in profiles})
+    if not names:
+        msg = "At least one selected column is required"
+        raise ValueError(msg)
+    return names
 
 
 def quoted_select_list(column_names: list[str]) -> str:

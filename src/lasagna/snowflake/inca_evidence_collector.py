@@ -5,21 +5,30 @@ from __future__ import annotations
 
 from . import inca_evidence_collector_artifacts as _artifacts
 from . import inca_evidence_collector_context as _context
+from . import inca_evidence_collector_fileio as _fileio
 from . import inca_evidence_collector_live as _live
 from . import inca_evidence_collector_phases as _phases
-from . import inca_evidence_collector_predicates as _predicates
-from . import inca_evidence_collector_rows as _rows
+from . import inca_evidence_collector_predicate_scan as _predicate_scan
+from . import inca_evidence_collector_predicate_sql as _predicate_sql
+from . import inca_evidence_collector_probe_snapshots as _probe_snapshots
+from . import inca_evidence_collector_semantic_fetch as _semantic_fetch
+from . import inca_evidence_collector_semantic_results as _semantic_results
 from . import inca_evidence_collector_setup as _setup
 from . import inca_evidence_collector_state as _state
+from .inca_evidence_collector_setup import main
 
 _PART_MODULES = (
     _context,
     _setup,
     _phases,
+    _semantic_fetch,
+    _semantic_results,
+    _probe_snapshots,
     _state,
+    _fileio,
     _live,
-    _predicates,
-    _rows,
+    _predicate_scan,
+    _predicate_sql,
     _artifacts,
 )
 
