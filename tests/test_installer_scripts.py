@@ -1,9 +1,18 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 
+WINDOWS_POWERSHELL_REQUIRED = pytest.mark.skipif(
+    os.name != "nt" or shutil.which("powershell") is None,
+    reason="Windows PowerShell script execution test",
+)
+
+
+@WINDOWS_POWERSHELL_REQUIRED
 def test_install_plan_is_per_user_no_admin_and_uses_lasagna_icon(tmp_path: Path) -> None:
     install_dir = tmp_path / "install-root"
     desktop_dir = tmp_path / "desktop"
@@ -52,6 +61,13 @@ def test_installer_scripts_do_not_mutate_machine_path() -> None:
     assert "IconLocation" in script_text
 
 
+def test_no_shortcut_install_does_not_launch_missing_shortcut() -> None:
+    script_text = Path("scripts/work_pc/install_lasagna.ps1").read_text(encoding="utf-8")
+
+    assert "if (-not $NoLaunch -and -not $NoDesktopShortcut)" in script_text
+
+
+@WINDOWS_POWERSHELL_REQUIRED
 def test_live_batch_script_fails_when_python_fails(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
