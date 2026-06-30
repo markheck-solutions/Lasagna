@@ -289,6 +289,10 @@ def _edge_side_orders_from_site_path(
         b_rank = site_order.get(edge.b_site_code)
         if a_rank is not None and b_rank is not None and a_rank != b_rank:
             side_order = ("A", "B") if a_rank < b_rank else ("B", "A")
+        elif a_rank is not None and b_rank is None:
+            side_order = ("A", "B")
+        elif b_rank is not None and a_rank is None:
+            side_order = ("B", "A")
         else:
             side_order = (
                 ("A", "B") if not previous_edges else _derive_edge_side_order(edge, previous_edges)
@@ -627,13 +631,10 @@ def _transport_site_order(
         return None
 
     bearer = edges[0]
-    bearer_name = bearer.route_path.upper()
     graph: SiteGraph = {}
     for edge in edges[1:]:
         _add_site_graph_edge(graph, edge.a_site_code, edge.b_site_code)
     for transport_edge in transport_edges:
-        if transport_edge.edge_name.upper() == bearer_name:
-            continue
         _add_site_graph_edge(
             graph,
             transport_edge.endpoint_1_site_code,

@@ -112,8 +112,8 @@ def _enrich_edges_with_transport_endpoint_proof(
             StructuredRouteEdge(
                 route_path=edge.route_path,
                 edge_sequence=edge.edge_sequence,
-                a_site_code=transport_edge.endpoint_1_site_code,
-                b_site_code=transport_edge.endpoint_2_site_code,
+                a_site_code=edge.a_site_code,
+                b_site_code=edge.b_site_code,
                 a_site_location_id=edge.a_site_location_id,
                 b_site_location_id=edge.b_site_location_id,
                 a_site_side=edge.a_site_side,

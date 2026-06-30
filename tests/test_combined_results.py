@@ -410,7 +410,7 @@ def test_structured_contract_preserves_bearer_a_to_b_transport_direction() -> No
         _metadata_between(service_id, right, 3, "MID", "AAA"),
     ]
     transport_adjacency = [
-        _transport_adjacency(service_id, bearer, "ZZZ", "AAA"),
+        _transport_adjacency(service_id, bearer, "AAA", "ZZZ"),
         _transport_adjacency(service_id, left, "ZZZ", "MID"),
         _transport_adjacency(service_id, right, "MID", "AAA"),
     ]
