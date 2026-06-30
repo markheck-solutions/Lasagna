@@ -311,7 +311,12 @@ def _normalize_bearer_endpoint_device_site_types(
         if not xs_sites:
             continue
         for row in rows:
-            if row.site_type == "BR" and row.site_code in xs_sites and row.is_device_row:
+            if (
+                row.site_type == "BR"
+                and row.site_code in xs_sites
+                and row.is_device_row
+                and not row.is_demarcation
+            ):
                 row.site_type = "XS"
                 row.site_type_no = ""
 

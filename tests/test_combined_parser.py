@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from lasagna.route_sorting.combined_parser import read_snowflake_combined_csv
+from lasagna.route_sorting.combined_results import _sort_rows_by_structured_contract
 
 
 def _write_combined_csv(path: Path, rows: list[tuple[str, dict[str, object]]]) -> Path:
@@ -133,3 +134,118 @@ def test_combined_parser_builds_rows_and_metadata_buckets(tmp_path: Path) -> Non
         "EXACT_DEVICE_PORT_MATCH"
     )
     assert parsed.dp_endpoint_roles[0]["MATCHED_SITE_SIDE"] == "B"
+
+
+def test_combined_parser_does_not_rewrite_br_dp_role_at_xs_device_site(
+    tmp_path: Path,
+) -> None:
+    service_id = "ICB-823999"
+    bearer = "AAA BR 1-BBB BR 2 100G01"
+    dp_route = "Demarcation point: BBB BR"
+    combined_csv = _write_combined_csv(
+        tmp_path / "combined.csv",
+        [
+            (
+                "DEVICE",
+                {
+                    "SERVICE_ID": service_id,
+                    "SITE_CODE": "AAA",
+                    "SITE_TYPE": "BR",
+                    "SITE_TYPE_NO": "1",
+                    "NE": "aaa-br",
+                    "NE_PART": "1",
+                    "OPTIC_FUNCTION": "QSFP-100G-LR4",
+                    "DEVICE_LOCATION": "[AAA]01/R01::1/1/1:1",
+                    "CONNECTION_POINT_NR": "01",
+                    "DIRECTION": "Tx",
+                    "ROUTE_PATH": bearer,
+                    "POS": 1,
+                    "NE_TYPE": "G30",
+                    "NE_FUNCTION": "TRANSPORT",
+                    "SLOT": "1",
+                    "SUBSLOT": "1",
+                },
+            ),
+            (
+                "DEVICE",
+                {
+                    "SERVICE_ID": service_id,
+                    "SITE_CODE": "BBB",
+                    "SITE_TYPE": "XS",
+                    "SITE_TYPE_NO": "7",
+                    "NE": "bbb-xs",
+                    "NE_PART": "1",
+                    "OPTIC_FUNCTION": "QSFP-100G-LR4",
+                    "DEVICE_LOCATION": "[BBB]01/R01::1/1/2:1",
+                    "CONNECTION_POINT_NR": "01",
+                    "DIRECTION": "Rx",
+                    "ROUTE_PATH": bearer,
+                    "POS": 2,
+                    "NE_TYPE": "G30",
+                    "NE_FUNCTION": "TRANSPORT",
+                    "SLOT": "1",
+                    "SUBSLOT": "2",
+                },
+            ),
+            (
+                "DP_SDP",
+                {
+                    "SERVICE_ID": service_id,
+                    "SITE_CODE": "BBB",
+                    "SITE_TYPE": "BR",
+                    "SITE_TYPE_NO": "2",
+                    "NE_INFORMATION": "DP old",
+                    "FUNCTION": "ODF",
+                    "CABLING_LOCATION": "[BBB]01/R01/RU01/.",
+                    "CABLING_POINTS": "09 Cable",
+                    "CONN_TYPE": "LC/UPC",
+                    "ROUTE_PATH": f"{dp_route} pos 9",
+                    "POS": 9,
+                },
+            ),
+            (
+                "ROUTE_ORDER_METADATA",
+                {
+                    "SERVICE_ID": service_id,
+                    "ROUTE_PATH": bearer,
+                    "EDGE_SEQUENCE": 1,
+                    "EDGE_NAME": bearer,
+                    "A_SITE_CODE": "AAA",
+                    "B_SITE_CODE": "BBB",
+                    "A_SITE_LOCATION_ID": "LOC-A",
+                    "B_SITE_LOCATION_ID": "LOC-B",
+                    "A_SITE_SIDE": "A",
+                    "B_SITE_SIDE": "B",
+                    "MEDIA": "ET",
+                },
+            ),
+            (
+                "DP_ENDPOINT_ROLE",
+                {
+                    "SERVICE_ID": service_id,
+                    "DP_ROUTE_PATH": dp_route,
+                    "SITE_CODE": "BBB",
+                    "SITE_TYPE": "BR",
+                    "SITE_TYPE_NO": "2",
+                    "POS": 9,
+                    "CABLING_POINTS": "09 Cable",
+                    "CONN_TYPE": "LC/UPC",
+                    "MATCHED_ROUTE_PATH": bearer,
+                    "MATCHED_SITE_SIDE": "B",
+                    "ENDPOINT_PROOF_SOURCE": "DP_EXACT_SITE_IDENTITY",
+                },
+            ),
+        ],
+    )
+
+    parsed = read_snowflake_combined_csv(str(combined_csv))
+    demarcation = next(row for row in parsed.services[service_id] if row.is_demarcation)
+
+    assert (demarcation.site_type, demarcation.site_type_no) == ("BR", "2")
+    sorted_rows = _sort_rows_by_structured_contract(
+        parsed.services[service_id],
+        parsed.route_order_metadata,
+        service_id,
+        dp_endpoint_roles=parsed.dp_endpoint_roles,
+    )
+    assert sorted_rows[-1].route_path == dp_route
