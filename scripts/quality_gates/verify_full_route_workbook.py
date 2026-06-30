@@ -258,6 +258,7 @@ def verify_workbook(
         first_difference = _first_difference(expected_service_rows, actual_service_rows)
         valid_ok = (
             not first_difference
+            and expected_service.get("status") == "OK"
             and summary_row.get("status") == "OK"
             and summary_row.get("route_order_source") == "STRUCTURED_ROUTE_CONTRACT"
         )

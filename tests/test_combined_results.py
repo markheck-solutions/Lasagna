@@ -1726,6 +1726,39 @@ def test_structured_contract_sorts_icb_823422_transport_backed_dp_role() -> None
     assert result[-1].route_path == dp_route
 
 
+def test_structured_contract_skips_transport_path_for_dp_only_route() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA-BBB 100G01"
+    dp_route = "Demarcation point: AAA XS"
+    dp_row = _row("AAA", dp_route, 1, ne_info="DP ODF")
+    dp_row.cabling_points = "1"
+    dp_row.conn_type = "LC"
+
+    result = _sort_rows_by_structured_contract(
+        [dp_row],
+        [_metadata_between(service_id, bearer, 1, "AAA", "BBB") | {"MEDIA": "ET"}],
+        service_id,
+        [_transport_adjacency(service_id, bearer, "AAA", "BBB")],
+        [
+            _dp_endpoint_role(
+                service_id,
+                dp_route,
+                "AAA",
+                "XS",
+                "",
+                1,
+                "1",
+                "LC",
+                bearer,
+                "A",
+                endpoint_proof_source="DP_SITE_CODE_TRANSPORT_ENDPOINT",
+            )
+        ],
+    )
+
+    assert result == [dp_row]
+
+
 def test_structured_contract_fails_for_icb_127392_ambiguous_dp_role() -> None:
     service_id = "ICB-127392"
     bearer = "KB X 98-OSD2/I BR 20 10G01"

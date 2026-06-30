@@ -629,6 +629,8 @@ def _transport_site_order(
     transport_edges = _service_transport_adjacencies(transport_device_adjacency, service_id)
     if not transport_edges:
         return None
+    if not required_sites:
+        return None
 
     bearer = edges[0]
     graph: SiteGraph = {}

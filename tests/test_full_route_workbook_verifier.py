@@ -221,3 +221,41 @@ def test_full_route_verifier_rejects_new_fail_closed_for_expected_good_service(
     assert result["status"] == "FAIL"
     assert result["services"][0]["workbook_status"] == "SORT FAILED"
     assert result["services"][0]["expected_row_count"] == 1
+
+
+def test_full_route_verifier_rejects_empty_ok_for_expected_fail_closed_service(
+    tmp_path: Path,
+) -> None:
+    parsed_inputs = parse_service_id_text("IC-123456")
+    expected_results = {
+        "IC-123456": ServiceRouteResult.sort_failed(
+            "IC-123456",
+            "transport adjacency path not proven for row site(s): MID",
+        )
+    }
+    [expected_workbook] = write_route_workbooks(
+        parsed_inputs, expected_results, tmp_path / "expected"
+    )
+    expected_path = tmp_path / "expected.json"
+    expected_path.write_text(
+        json.dumps(capture_expectations(expected_workbook.path)),
+        encoding="utf-8",
+    )
+
+    actual_results = {
+        "IC-123456": ServiceRouteResult.ok(
+            "IC-123456",
+            (),
+            route_order_source=ROUTE_ORDER_AUTHORITY,
+        )
+    }
+    [actual_workbook] = write_route_workbooks(parsed_inputs, actual_results, tmp_path / "actual")
+
+    result = verify_workbook(
+        actual_workbook.path, _combined_csv(tmp_path / "combined.csv"), expected_path
+    )
+
+    assert result["status"] == "FAIL"
+    assert result["services"][0]["workbook_status"] == "OK"
+    assert result["services"][0]["expected_row_count"] == 0
+    assert result["services"][0]["actual_row_count"] == 0
