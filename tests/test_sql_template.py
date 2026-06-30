@@ -68,6 +68,24 @@ def test_route_order_metadata_is_scoped_to_exported_route_paths() -> None:
     assert "SELECT DISTINCT\n    ranked.service_id AS SERVICE_ID" in template
 
 
+def test_route_order_edge_sequence_uses_full_walk_path_not_local_minima() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+    position_block = template.split(
+        "CREATE OR REPLACE TEMP TABLE prod_route_order_position_rows AS", 1
+    )[1].split("-- Role: prod_route_order_site_sides", 1)[0]
+    ranking_block = template.split(
+        "CREATE OR REPLACE TEMP TABLE prod_route_order_metadata_rows AS", 1
+    )[1].split("LEFT JOIN prod_trunk_metadata_rows pcg", 1)[0]
+
+    assert "edge_position_sort_path" in position_block
+    assert "MIN(walk.edge_position_path) AS edge_position_path" in position_block
+    assert "MIN(walk.edge_position_sort_path) AS edge_position_sort_path" in position_block
+    assert "MIN(walk.edge_position) AS edge_position" not in position_block
+    assert "MIN(walk.edge_position_id) AS edge_position_id" not in position_block
+    assert "ORDER BY edge_position_sort_path, edge_position_path, edge_name" in ranking_block
+    assert "ORDER BY edge_position, edge_position_id" not in ranking_block
+
+
 def test_transport_device_adjacency_uses_recursive_ccp_endpoint_facts() -> None:
     template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
 

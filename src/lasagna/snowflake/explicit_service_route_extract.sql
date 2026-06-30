@@ -525,6 +525,7 @@ WITH RECURSIVE edge_walk(
     edge_position,
     edge_position_id,
     edge_position_path,
+    edge_position_sort_path,
     path_text
 ) AS (
     SELECT
@@ -537,6 +538,9 @@ WITH RECURSIVE edge_walk(
         EDGE_POSITION_ID,
         COALESCE(EDGE_POSITION, 0)::VARCHAR || ':' || COALESCE(EDGE_POSITION_ID, 0)::VARCHAR
             AS EDGE_POSITION_PATH,
+        LPAD(COALESCE(EDGE_POSITION, 0)::VARCHAR, 20, '0') || ':' ||
+            LPAD(COALESCE(EDGE_POSITION_ID, 0)::VARCHAR, 20, '0')
+            AS EDGE_POSITION_SORT_PATH,
         EDGE_NAME AS PATH_TEXT
     FROM prod_edge_roots
 
@@ -573,6 +577,20 @@ WITH RECURSIVE edge_walk(
                 cp.CHILD_INT_ID,
                 0
             )::VARCHAR AS EDGE_POSITION_PATH,
+        ew.EDGE_POSITION_SORT_PATH || '>' ||
+            LPAD(COALESCE(
+                TRY_TO_NUMBER(cp.PCGPOSITION),
+                TRY_TO_NUMBER(cp.TRANSMISSIONPOSITION),
+                cp.CSPOSITION,
+                0
+            )::VARCHAR, 20, '0') || ':' ||
+            LPAD(COALESCE(
+                cp.FK_PCGPOSITION_INTID,
+                cp.FK_TRANSPOSITION_INTID,
+                cp.FK_CSPOSITION_INTID,
+                cp.CHILD_INT_ID,
+                0
+            )::VARCHAR, 20, '0') AS EDGE_POSITION_SORT_PATH,
         ew.PATH_TEXT || ' > ' || COALESCE(cp.BFK_TRANSMISSION, cp.BFK_PCG) AS PATH_TEXT
     FROM edge_walk ew
     JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_POSITION_CURRENT cp
@@ -589,6 +607,7 @@ SELECT
     edge_position,
     edge_position_id,
     edge_position_path,
+    edge_position_sort_path,
     path_text
 FROM edge_walk;
 
@@ -1414,8 +1433,8 @@ CREATE OR REPLACE TEMP TABLE prod_route_order_position_rows AS
 SELECT
     walk.service_id,
     walk.edge_name,
-    MIN(walk.edge_position) AS edge_position,
-    MIN(walk.edge_position_id) AS edge_position_id
+    MIN(walk.edge_position_path) AS edge_position_path,
+    MIN(walk.edge_position_sort_path) AS edge_position_sort_path
 FROM prod_edge_walk walk
 JOIN prod_route_order_relevant_edges relevant_edges
     ON relevant_edges.SERVICE_ID = walk.service_id
@@ -1462,7 +1481,7 @@ FROM (
         edge_name,
         DENSE_RANK() OVER (
             PARTITION BY service_id
-            ORDER BY edge_position, edge_position_id
+            ORDER BY edge_position_sort_path, edge_position_path, edge_name
         ) AS edge_sequence
     FROM prod_route_order_position_rows
 ) ranked
