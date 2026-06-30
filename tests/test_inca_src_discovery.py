@@ -1133,6 +1133,32 @@ def test_dwdm_adjacency_probe_classifies_six_services_and_rejects_transmission_f
     assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
 
 
+def test_semantic_probe_records_content_fanout_count_for_owner_approval(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="semantic-probe")
+    args.semantic_site_code = "ANY"
+    args.semantic_fetch_row_limit = 10
+    args.semantic_service_ids = ("IC-339967",)
+    state = collector.initialize_run(args)
+    state.profiles = semantic_probe_profiles()
+
+    collector.phase_write_dtn_semantic_probe(DwdmMultiServiceProbeCursor(), state)
+
+    snapshot = json.loads(
+        (state.run_dir / "dtn_semantic_probe_snapshot.json").read_text(encoding="utf-8")
+    )
+    content_notes = [
+        note
+        for note in snapshot["query_notes"]
+        if str(note.get("label", "")).startswith("ccp_content_candidate_")
+    ]
+
+    assert 81 in {note["count"] for note in content_notes}
+    assert snapshot["dwdm_adjacency"]["fanout_limit_exceeded"] is True
+    assert snapshot["dwdm_adjacency"]["decision"] == OWNER_APPROVAL_REQUIRED
+
+
 def test_route_bag_seed_mode_uses_route_ids_without_service_anchor_scan(tmp_path: Path) -> None:
     bag_path = tmp_path / "route_seed_id_bag.json"
     bag_path.write_text(

@@ -193,7 +193,13 @@ def semantic_content_candidates(
                 continue
             seen.add(text)
             count, query_id = semantic_count_ccp_content(cursor, state, columns, text)
-            query_notes.append({"label": f"ccp_content_candidate_{column}", "query_id": query_id})
+            query_notes.append(
+                {
+                    "label": f"ccp_content_candidate_{column}",
+                    "query_id": query_id,
+                    "count": count,
+                }
+            )
             if 0 < count <= state.config.semantic_fetch_row_limit:
                 candidates.append(
                     {
