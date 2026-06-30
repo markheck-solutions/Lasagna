@@ -39,7 +39,9 @@ def _candidate_files(repo_root: Path) -> list[Path]:
     relative_paths = _git_lines(
         repo_root, ["ls-files", "--cached", "--others", "--exclude-standard"]
     )
-    return [repo_root / relative_path for relative_path in relative_paths]
+    return [
+        path for relative_path in relative_paths if (path := repo_root / relative_path).exists()
+    ]
 
 
 def _read_text(path: Path) -> str:

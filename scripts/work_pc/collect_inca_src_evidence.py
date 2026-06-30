@@ -6,16 +6,27 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping, cast
 
 import snowflake.connector
 
+from lasagna.evidence_snapshots import (
+    SnapshotLimits,
+    decision_matrix_payload,
+    predicate_probe_snapshot_payload,
+    probe_decision,
+    profile_snapshot_payload,
+    sanitize_sample_rows,
+    source_manifest_payload,
+    stable_digest,
+)
 from lasagna.snowflake.inca_src_discovery import (
     COVERAGE_MATRIX_COLUMNS,
     DEFAULT_DATABASE,
@@ -73,6 +84,12 @@ DOC_SNAPSHOT_FILES = {
     "FRAMEWORK_RUNBOOK_SNAPSHOT.md": "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md",
     "STATUS_CONTRACT_SNAPSHOT.md": "docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md",
     "AI_HANDOFF_SNAPSHOT.md": "docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md",
+    "BOUNDED_JSON_SNAPSHOT_PROTOCOL.md": (
+        "docs/runbooks/BOUNDED_JSON_EVIDENCE_SNAPSHOT_PROTOCOL.md"
+    ),
+    "BOUNDED_JSON_SNAPSHOT_CONTRACT.md": (
+        "docs/contracts/BOUNDED_JSON_EVIDENCE_SNAPSHOT_CONTRACT.md"
+    ),
 }
 HARD_CONSTRAINTS = {
     "rag_proof_allowed": False,
@@ -92,9 +109,33 @@ PHASES = (
     "write_schema_profile",
     "build_structured_id_dictionary",
     "extract_service_seed_ids",
+    "write_probe_snapshots",
+    "write_dtn_semantic_probe",
     "run_exact_id_overlap_scan",
     "run_graph_closure",
     "write_final_status",
+)
+DTN_SEMANTIC_OBJECTS = {
+    "service": "V_T_INCATNT_SERVICE_TRANSMISSION_CURRENT",
+    "content_position": "V_T_INCATNT_CONTENT_POSITION_CURRENT",
+    "content_connection_point": "V_T_INCATNT_CONTENT_CONNECTION_POINT_CURRENT",
+    "connection_cabling_point": "V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT",
+    "cabling": "V_T_INCATNT_CABLING_CURRENT",
+    "ne_part": "V_T_INCATNT_NE_PART_CURRENT",
+}
+DEFAULT_DWDM_ADJACENCY_SERVICE_IDS = (
+    "IC-388612",
+    "IC-386642",
+    "IC-386283",
+    "IC-324417",
+    "IC-392063",
+    "IC-339967",
+)
+DWDM_ADJACENCY_DECISIONS = (
+    "PROVEN_DWDM_ADJACENCY",
+    "TRANSMISSION_ONLY_FANOUT",
+    "INCOMPLETE",
+    "OWNER_APPROVAL_REQUIRED",
 )
 METADATA_GAPS_COLUMNS = (
     "metadata_object",
@@ -140,6 +181,12 @@ class LiveConfig:
     phase_mode: str
     seed_mode: str
     route_seed_id_bag: Path | None
+    connection_name: str
+    probe_sample_row_limit: int
+    semantic_site_code: str
+    semantic_device_token: str
+    semantic_fetch_row_limit: int
+    semantic_service_ids: tuple[str, ...]
     internal_deadline_seconds: int
     statement_timeout_seconds: int
     framework_commit_sha: str
@@ -186,6 +233,7 @@ class RunState:
     candidates: list[dict[str, object]]
     seed_scan: SeedScanResult
     graph_scan: GraphScanResult
+    semantic_probe: dict[str, object] | None = None
     closure: object | None = None
 
 
@@ -211,9 +259,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pages-per-predicate", type=int, default=25)
     parser.add_argument(
         "--phase",
-        choices=("full", "metadata-only", "seed-only"),
+        choices=(
+            "full",
+            "metadata-only",
+            "seed-only",
+            "probe-only",
+            "snapshot-only",
+            "semantic-probe",
+        ),
         default="full",
-        help="Run full evidence, metadata-only smoke, or seed-only smoke.",
+        help=(
+            "Run full evidence, metadata-only smoke, seed-only smoke, bounded JSON "
+            "probe snapshots, or bounded DTN semantic candidate probing."
+        ),
     )
     parser.add_argument(
         "--seed-mode",
@@ -222,6 +280,17 @@ def parse_args() -> argparse.Namespace:
         help="Choose IC seed source. route-bag uses a route-derived structured ID artifact.",
     )
     parser.add_argument("--route-seed-id-bag", type=Path, default=None)
+    parser.add_argument("--semantic-site-code", default="ASH/R1")
+    parser.add_argument("--semantic-device-token", default="DTN")
+    parser.add_argument("--semantic-fetch-row-limit", type=int, default=125)
+    parser.add_argument(
+        "--semantic-service-ids",
+        default="",
+        help=(
+            "Optional comma/space separated service IDs for one bounded DWDM adjacency "
+            "semantic-probe run. Defaults to --service-id."
+        ),
+    )
     parser.add_argument(
         "--internal-deadline-seconds",
         type=int,
@@ -232,6 +301,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_STATEMENT_TIMEOUT_SECONDS,
     )
+    parser.add_argument("--probe-sample-row-limit", type=int, default=5)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
     parser.add_argument(
@@ -241,6 +311,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--start-fresh", action="store_true")
     return parser.parse_args()
+
+
+def parse_semantic_service_ids(primary_service_id: str, raw_service_ids: object) -> tuple[str, ...]:
+    if isinstance(raw_service_ids, (list, tuple)):
+        tokens = [str(token).strip() for token in raw_service_ids if str(token).strip()]
+    else:
+        tokens = [
+            token.strip() for token in re.split(r"[\s,;]+", str(raw_service_ids)) if token.strip()
+        ]
+    service_ids = tokens or [primary_service_id]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for service_id in service_ids:
+        normalized = service_id.upper()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return tuple(deduped)
 
 
 def main() -> int:
@@ -286,6 +375,14 @@ def initialize_run(args: argparse.Namespace) -> RunState:
         phase_mode=args.phase,
         seed_mode=args.seed_mode,
         route_seed_id_bag=Path(args.route_seed_id_bag) if args.route_seed_id_bag else None,
+        connection_name=args.connection,
+        probe_sample_row_limit=args.probe_sample_row_limit,
+        semantic_site_code=str(getattr(args, "semantic_site_code", "ASH/R1")),
+        semantic_device_token=str(getattr(args, "semantic_device_token", "DTN")),
+        semantic_fetch_row_limit=int(getattr(args, "semantic_fetch_row_limit", 125)),
+        semantic_service_ids=parse_semantic_service_ids(
+            args.service_id, getattr(args, "semantic_service_ids", "")
+        ),
         internal_deadline_seconds=args.internal_deadline_seconds,
         statement_timeout_seconds=args.statement_timeout_seconds,
         framework_commit_sha=resolve_framework_commit(args.repo_root, args.framework_commit),
@@ -354,6 +451,15 @@ def initial_run_manifest(config: LiveConfig, run_dir: Path) -> dict[str, object]
         "route_seed_id_bag": ""
         if config.route_seed_id_bag is None
         else str(config.route_seed_id_bag),
+        "connection_name": config.connection_name,
+        "bounded_json_snapshots": config.phase_mode
+        in {"probe-only", "snapshot-only", "semantic-probe"},
+        "probe_sample_row_limit": config.probe_sample_row_limit,
+        "probe_deep_fetch_row_limit": probe_limits(config).deep_fetch_row_limit,
+        "semantic_site_code": config.semantic_site_code,
+        "semantic_device_token": config.semantic_device_token,
+        "semantic_fetch_row_limit": config.semantic_fetch_row_limit,
+        "semantic_service_ids": list(config.semantic_service_ids),
         "run_dir": str(run_dir),
         "started_at": utc_now(),
         "completed_at": "",
@@ -385,6 +491,13 @@ def write_baseline_artifacts(state: RunState) -> None:
         write_csv_artifact(state.run_dir / "query_log.csv", QUERY_LOG_COLUMNS, ())
         write_csv_artifact(state.run_dir / "phase_log.csv", PHASE_LOG_COLUMNS, ())
         write_progress_summary(state, "initialize_run")
+        write_source_manifest(state)
+        write_jsonl_artifact(state.run_dir / "profile_snapshots.jsonl", ())
+        write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", ())
+        write_json_artifact(
+            state.run_dir / "probe_decision_matrix.json",
+            decision_matrix_payload(state.config.run_id, ()),
+        )
         write_json_artifact(
             state.run_dir / "graph_closure_summary.json",
             graph_closure_summary_payload(
@@ -491,11 +604,23 @@ def run_collector_phases(args: argparse.Namespace, state: RunState) -> RunState:
                 "build_structured_id_dictionary",
                 lambda: phase_build_structured_id_dictionary(state),
             )
-            if args.phase in {"seed-only", "full"}:
+            if args.phase in {"seed-only", "probe-only", "snapshot-only", "semantic-probe", "full"}:
                 run_phase(
                     state,
                     "extract_service_seed_ids",
                     lambda: phase_extract_service_seed_ids(cursor, state),
+                )
+            if args.phase in {"probe-only", "snapshot-only", "semantic-probe"}:
+                run_phase(
+                    state,
+                    "write_probe_snapshots",
+                    lambda: phase_write_probe_snapshots(cursor, state),
+                )
+            if args.phase == "semantic-probe":
+                run_phase(
+                    state,
+                    "write_dtn_semantic_probe",
+                    lambda: phase_write_dtn_semantic_probe(cursor, state),
                 )
             if args.phase == "full":
                 run_phase(
@@ -719,6 +844,7 @@ def phase_write_schema_profile(state: RunState) -> None:
         csv_headers(state.metadata.get("columns", [])),
         state.metadata.get("columns", []),
     )
+    write_profile_snapshots(state)
     refresh_run_manifest_counts(state)
 
 
@@ -825,6 +951,1112 @@ def phase_run_graph_closure(state: RunState) -> None:
     )
 
 
+def phase_write_probe_snapshots(cursor: object, state: RunState) -> None:
+    snapshots = collect_predicate_probe_snapshots(cursor, state)
+    write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", snapshots)
+    write_json_artifact(
+        state.run_dir / "probe_decision_matrix.json",
+        decision_matrix_payload(state.config.run_id, snapshots),
+    )
+    write_progress_summary(
+        state,
+        "write_probe_snapshots",
+        reason=f"predicate_probe_count={len(snapshots)}",
+    )
+
+
+def phase_write_dtn_semantic_probe(cursor: object, state: RunState) -> None:
+    probes = collect_dwdm_adjacency_proofs(cursor, state)
+    probe = probes[0] if probes else dtn_semantic_probe_payload(state, {}, {}, [], [], [])
+    state.semantic_probe = {"services": probes} if len(probes) > 1 else probe
+    snapshot = cast("Mapping[str, object]", probe["snapshot"])
+    classification = cast("Mapping[str, object]", probe["classification"])
+    service_summary = dwdm_adjacency_service_summary(state, probes)
+    dwdm_matrix = dwdm_adjacency_decision_matrix(state, service_summary)
+    predicate_snapshots = dwdm_predicate_probe_snapshots(state, service_summary)
+    write_json_artifact(
+        state.run_dir / "dtn_semantic_probe_snapshot.json",
+        snapshot,
+    )
+    write_json_artifact(
+        state.run_dir / "dtn_relation_classification.json",
+        classification,
+    )
+    write_json_artifact(state.run_dir / "dwdm_adjacency_service_summary.json", service_summary)
+    write_json_artifact(state.run_dir / "dwdm_adjacency_decision_matrix.json", dwdm_matrix)
+    write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", predicate_snapshots)
+    write_json_artifact(
+        state.run_dir / "probe_decision_matrix.json",
+        decision_matrix_payload(state.config.run_id, predicate_snapshots),
+    )
+    counts = classification.get("counts", {})
+    write_progress_summary(
+        state,
+        "write_dtn_semantic_probe",
+        reason=f"dtn_candidate_counts={json.dumps(counts, sort_keys=True)}",
+    )
+
+
+def collect_dwdm_adjacency_proofs(cursor: object, state: RunState) -> list[dict[str, object]]:
+    probes: list[dict[str, object]] = []
+    for service_id in state.config.semantic_service_ids:
+        check_deadline(state, "write_dtn_semantic_probe", service_id)
+        service_state = replace(state, config=replace(state.config, service_id=service_id))
+        probes.append(collect_dtn_semantic_probe(cursor, service_state))
+    return probes
+
+
+def collect_dtn_semantic_probe(cursor: object, state: RunState) -> dict[str, object]:
+    columns = semantic_columns_by_object(state.profiles)
+    blockers = semantic_schema_blockers(columns)
+    query_notes: list[dict[str, object]] = []
+    if blockers:
+        return dtn_semantic_probe_payload(state, {}, {}, [], blockers, query_notes)
+
+    service_rows = semantic_fetch_service_rows(cursor, state, columns, query_notes)
+    seed_values = semantic_seed_values(service_rows, columns[DTN_SEMANTIC_OBJECTS["service"]])
+    cp_rows = semantic_fetch_content_position_seed_rows(
+        cursor, state, columns, seed_values, query_notes
+    )
+    content_candidates = semantic_content_candidates(cursor, state, columns, cp_rows, query_notes)
+    device_rows = semantic_fetch_device_rows(
+        cursor, state, columns, content_candidates, query_notes
+    )
+    dtn_rows = [row for row in device_rows if semantic_row_matches_target(row, state.config)]
+    connpt_ids = sorted({semantic_text(row.get("CCP__CONNPT_INT_ID")) for row in dtn_rows})
+    connpt_ids = [value for value in connpt_ids if value]
+    cacp_rows = semantic_fetch_cacp_rows(cursor, state, columns, connpt_ids, query_notes)
+    cabpt_ids = sorted({semantic_text(row.get("CABPT_INT_ID")) for row in cacp_rows})
+    cabpt_ids = [value for value in cabpt_ids if value]
+    cabling_rows = semantic_fetch_cabling_rows(cursor, state, columns, cabpt_ids, query_notes)
+    peer_ids = semantic_peer_cabpt_ids(cabpt_ids, cabling_rows)
+    peer_cacp_rows = semantic_fetch_peer_cacp_rows(cursor, state, columns, peer_ids, query_notes)
+    rows = {
+        "service_transmission": service_rows,
+        "content_position_seed": cp_rows,
+        "content_connection_point_devices": device_rows,
+        "ashr1_dtn_device_rows": dtn_rows,
+        "dtn_device_rows": dtn_rows,
+        "dtn_cacp_rows": cacp_rows,
+        "dtn_cabling_rows": cabling_rows,
+        "cabling_peer_cacp_rows": peer_cacp_rows,
+    }
+    seed_ids = {"CONNPT_INT_ID": connpt_ids, "CABPT_INT_ID": cabpt_ids}
+    return dtn_semantic_probe_payload(
+        state, rows, seed_ids, content_candidates, blockers, query_notes
+    )
+
+
+def semantic_columns_by_object(profiles: list[ColumnProfile]) -> dict[str, list[str]]:
+    columns: dict[str, list[str]] = defaultdict(list)
+    for profile in profiles:
+        columns[profile.object_name].append(profile.column_name)
+    return columns
+
+
+def semantic_schema_blockers(columns: dict[str, list[str]]) -> list[dict[str, object]]:
+    required = {
+        DTN_SEMANTIC_OBJECTS["service"]: ("SERVICE_ID",),
+        DTN_SEMANTIC_OBJECTS["content_position"]: (),
+        DTN_SEMANTIC_OBJECTS["content_connection_point"]: ("CONTENT", "CONNPT_INT_ID"),
+        DTN_SEMANTIC_OBJECTS["connection_cabling_point"]: ("CONNPT_INT_ID", "CABPT_INT_ID"),
+        DTN_SEMANTIC_OBJECTS["cabling"]: ("A_CABPT_INT_ID", "B_CABPT_INT_ID"),
+    }
+    blockers: list[dict[str, object]] = []
+    for object_name, required_columns in required.items():
+        available = set(columns.get(object_name, []))
+        missing = [column for column in required_columns if column not in available]
+        if object_name not in columns or missing:
+            blockers.append(
+                {
+                    "label": "semantic_probe_schema",
+                    "object_name": object_name,
+                    "missing_columns": missing,
+                    "reason": "required object or column unavailable",
+                }
+            )
+    return blockers
+
+
+def semantic_fetch_service_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    object_name = DTN_SEMANTIC_OBJECTS["service"]
+    selected = semantic_select_list("", columns[object_name])
+    sql = (
+        f"SELECT {selected} FROM {qualified_object(state.config.database, state.config.schema, object_name)} "
+        f"WHERE {quote_identifier('SERVICE_ID')} = %s ORDER BY {quote_identifier('SERVICE_ID')} "
+        "LIMIT %s OFFSET %s"
+    )
+    result = execute_rows(
+        cursor,
+        sql,
+        (state.config.service_id, state.config.probe_sample_row_limit, 0),
+        state,
+        "write_dtn_semantic_probe",
+        "semantic_service_transmission_fetch",
+    )
+    query_notes.append({"label": "service_transmission", "query_id": result.query_id})
+    return result.rows
+
+
+def semantic_seed_values(rows: list[dict[str, object]], columns: list[str]) -> list[str]:
+    seed_columns = set(semantic_id_columns(columns))
+    values = {
+        semantic_text(value)
+        for row in rows
+        for column, value in row.items()
+        if column in seed_columns and semantic_text(value)
+    }
+    return sorted(values)
+
+
+def semantic_id_columns(columns: list[str]) -> list[str]:
+    names = []
+    for column in columns:
+        if (
+            column.endswith("_INT_ID")
+            or column.endswith("_IDENTITY")
+            or column in {"CONTENT", "TRANSMISSION_INTID", "SERVICE_ID"}
+        ):
+            names.append(column)
+    return names
+
+
+def semantic_fetch_content_position_seed_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    seed_values: list[str],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    object_name = DTN_SEMANTIC_OBJECTS["content_position"]
+    selected = semantic_select_list("", columns[object_name])
+    rows: list[dict[str, object]] = []
+    seen_hashes: set[str] = set()
+    for seed_value in seed_values:
+        for column in semantic_id_columns(columns[object_name]):
+            fetched = semantic_fetch_exact_text_rows(
+                cursor,
+                state,
+                object_name,
+                selected,
+                column,
+                seed_value,
+                state.config.probe_sample_row_limit,
+                f"semantic_cp_seed_{column}",
+                query_notes,
+            )
+            for row in fetched:
+                row_hash = stable_hash(json.dumps(row, sort_keys=True, default=str))
+                if row_hash not in seen_hashes:
+                    seen_hashes.add(row_hash)
+                    rows.append(row)
+    return rows
+
+
+def semantic_content_candidates(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    cp_rows: list[dict[str, object]],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in cp_rows[: state.config.probe_sample_row_limit]:
+        for column, value in sorted(row.items()):
+            text = semantic_text(value)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            count, query_id = semantic_count_ccp_content(cursor, state, columns, text)
+            query_notes.append({"label": f"ccp_content_candidate_{column}", "query_id": query_id})
+            if 0 < count <= state.config.semantic_fetch_row_limit:
+                candidates.append(
+                    {
+                        "_value": text,
+                        "source_column": column,
+                        "value_digest": stable_digest(text),
+                        "device_count": count,
+                    }
+                )
+    return candidates
+
+
+def semantic_count_ccp_content(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    value: str,
+) -> tuple[int, str]:
+    object_name = DTN_SEMANTIC_OBJECTS["content_connection_point"]
+    extra = semantic_ccp_device_filter(columns[object_name])
+    sql = (
+        "SELECT COUNT(*) AS MATCH_COUNT "
+        f"FROM {qualified_object(state.config.database, state.config.schema, object_name)} "
+        f"WHERE TO_VARCHAR({quote_identifier('CONTENT')}) = %s{extra}"
+    )
+    return execute_count(
+        cursor, sql, (value,), state, "write_dtn_semantic_probe", "semantic_ccp_content_count"
+    )
+
+
+def semantic_fetch_device_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    candidates: list[dict[str, object]],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    object_name = DTN_SEMANTIC_OBJECTS["content_connection_point"]
+    selected = semantic_device_select(columns)
+    for candidate in candidates:
+        value = str(candidate.get("_value", ""))
+        if not value:
+            continue
+        extra = semantic_ccp_device_filter(columns[object_name], alias="ccp")
+        sql = (
+            f"SELECT {selected} FROM {semantic_device_from_clause(state, columns)} "
+            f"WHERE TO_VARCHAR(ccp.{quote_identifier('CONTENT')}) = %s{extra} "
+            "ORDER BY ccp."
+            f"{quote_identifier('CONNPT_INT_ID')} LIMIT %s OFFSET %s"
+        )
+        result = execute_rows(
+            cursor,
+            sql,
+            (value, state.config.semantic_fetch_row_limit, 0),
+            state,
+            "write_dtn_semantic_probe",
+            "semantic_ccp_device_fetch",
+        )
+        query_notes.append({"label": "ccp_device_fetch", "query_id": result.query_id})
+        rows.extend(result.rows)
+    return rows
+
+
+def semantic_select_list(alias: str, columns: list[str]) -> str:
+    prefix = f"{alias}." if alias else ""
+    return ", ".join(f"{prefix}{quote_identifier(column)}" for column in columns)
+
+
+def semantic_prefixed_select(alias: str, columns: list[str], prefix: str) -> str:
+    return ", ".join(
+        f"{alias}.{quote_identifier(column)} AS {quote_identifier(f'{prefix}__{column}')}"
+        for column in columns
+    )
+
+
+def semantic_fetch_exact_text_rows(
+    cursor: object,
+    state: RunState,
+    object_name: str,
+    selected: str,
+    column: str,
+    value: str,
+    row_limit: int,
+    logical_name: str,
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    count_sql = (
+        "SELECT COUNT(*) AS MATCH_COUNT "
+        f"FROM {qualified_object(state.config.database, state.config.schema, object_name)} "
+        f"WHERE TO_VARCHAR({quote_identifier(column)}) = %s"
+    )
+    count, count_query_id = execute_count(
+        cursor, count_sql, (value,), state, "write_dtn_semantic_probe", f"{logical_name}_count"
+    )
+    query_notes.append(
+        {"label": f"{logical_name}_count", "query_id": count_query_id, "count": count}
+    )
+    if count <= 0 or count > row_limit:
+        return []
+    fetch_sql = (
+        f"SELECT {selected} "
+        f"FROM {qualified_object(state.config.database, state.config.schema, object_name)} "
+        f"WHERE TO_VARCHAR({quote_identifier(column)}) = %s "
+        f"ORDER BY {quote_identifier(column)} LIMIT %s OFFSET %s"
+    )
+    result = execute_rows(
+        cursor,
+        fetch_sql,
+        (value, row_limit, 0),
+        state,
+        "write_dtn_semantic_probe",
+        f"{logical_name}_fetch",
+    )
+    query_notes.append({"label": f"{logical_name}_fetch", "query_id": result.query_id})
+    return result.rows
+
+
+def semantic_ccp_device_filter(ccp_columns: list[str], alias: str = "") -> str:
+    if "NE" in ccp_columns:
+        prefix = f"{alias}." if alias else ""
+        return f" AND {prefix}{quote_identifier('NE')} IS NOT NULL"
+    return ""
+
+
+def semantic_device_select(columns: dict[str, list[str]]) -> str:
+    ccp_columns = [
+        column
+        for column in columns[DTN_SEMANTIC_OBJECTS["content_connection_point"]]
+        if column
+        in {
+            "CONTENT",
+            "CONTENT_INT_ID",
+            "CONNPT_INT_ID",
+            "NE",
+            "NE_PART",
+            "SITE_CODE",
+            "SLOT",
+            "SUBSLOT",
+            "CONNECTION_POINT_NR",
+            "CONNECTION_POINT_TYPE",
+            "PORT_TYPE",
+        }
+    ]
+    selected = [semantic_prefixed_select("ccp", ccp_columns, "CCP")]
+    ne_part_columns = columns.get(DTN_SEMANTIC_OBJECTS["ne_part"], [])
+    if semantic_ne_part_join_allowed(columns):
+        selected.append(
+            semantic_prefixed_select(
+                "nep",
+                [
+                    column
+                    for column in ne_part_columns
+                    if column
+                    in {
+                        "NE",
+                        "NE_PART_NAME",
+                        "NEPART_SITE_CODE",
+                        "NE_TYPE",
+                        "NE_PART_TYPE",
+                        "MODEL",
+                        "TECHNOLOGY",
+                    }
+                ],
+                "NEP",
+            )
+        )
+    return ", ".join(part for part in selected if part)
+
+
+def semantic_device_from_clause(state: RunState, columns: dict[str, list[str]]) -> str:
+    ccp_object = qualified_object(
+        state.config.database, state.config.schema, DTN_SEMANTIC_OBJECTS["content_connection_point"]
+    )
+    if not semantic_ne_part_join_allowed(columns):
+        return f"{ccp_object} ccp"
+    nep_object = qualified_object(
+        state.config.database, state.config.schema, DTN_SEMANTIC_OBJECTS["ne_part"]
+    )
+    return (
+        f"{ccp_object} ccp LEFT JOIN {nep_object} nep "
+        f"ON ccp.{quote_identifier('NE')} = nep.{quote_identifier('NE')} "
+        f"AND ccp.{quote_identifier('NE_PART')} = nep.{quote_identifier('NE_PART_NAME')}"
+    )
+
+
+def semantic_ne_part_join_allowed(columns: dict[str, list[str]]) -> bool:
+    ccp_columns = set(columns.get(DTN_SEMANTIC_OBJECTS["content_connection_point"], []))
+    nep_columns = set(columns.get(DTN_SEMANTIC_OBJECTS["ne_part"], []))
+    return {"NE", "NE_PART"} <= ccp_columns and {"NE", "NE_PART_NAME"} <= nep_columns
+
+
+def semantic_row_matches_target(row: dict[str, object], config: LiveConfig) -> bool:
+    site = semantic_text(row.get("NEP__NEPART_SITE_CODE")) or semantic_text(
+        row.get("CCP__SITE_CODE")
+    )
+    haystack = " ".join(semantic_text(value) for value in row.values())
+    return semantic_site_matches_target(site, config.semantic_site_code) and (
+        config.semantic_device_token.upper() in haystack.upper()
+    )
+
+
+def semantic_site_matches_target(site: str, target_site: str) -> bool:
+    normalized = target_site.strip().upper()
+    if normalized in {"", "*", "ANY", "ALL"}:
+        return True
+    return site.upper() == normalized
+
+
+def semantic_fetch_cacp_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    connpt_ids: list[str],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    object_name = DTN_SEMANTIC_OBJECTS["connection_cabling_point"]
+    return semantic_fetch_in_rows(
+        cursor,
+        state,
+        object_name,
+        columns[object_name],
+        "CONNPT_INT_ID",
+        connpt_ids,
+        "semantic_dtn_cacp_by_connpt",
+        query_notes,
+    )
+
+
+def semantic_fetch_cabling_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    cabpt_ids: list[str],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if not cabpt_ids:
+        return []
+    object_name = DTN_SEMANTIC_OBJECTS["cabling"]
+    placeholders = semantic_placeholders(len(cabpt_ids))
+    selected = semantic_select_list("", columns[object_name])
+    where_sql = (
+        f"TO_VARCHAR({quote_identifier('A_CABPT_INT_ID')}) IN ({placeholders}) "
+        f"OR TO_VARCHAR({quote_identifier('B_CABPT_INT_ID')}) IN ({placeholders})"
+    )
+    return semantic_fetch_where_rows(
+        cursor,
+        state,
+        object_name,
+        selected,
+        where_sql,
+        (*cabpt_ids, *cabpt_ids),
+        "semantic_dtn_cabling_by_cabpt",
+        query_notes,
+    )
+
+
+def semantic_peer_cabpt_ids(
+    cabpt_ids: list[str], cabling_rows: list[dict[str, object]]
+) -> list[str]:
+    ids = set(cabpt_ids)
+    for row in cabling_rows:
+        for column in ("A_CABPT_INT_ID", "B_CABPT_INT_ID"):
+            value = semantic_text(row.get(column))
+            if value:
+                ids.add(value)
+    return sorted(ids)
+
+
+def semantic_fetch_peer_cacp_rows(
+    cursor: object,
+    state: RunState,
+    columns: dict[str, list[str]],
+    cabpt_ids: list[str],
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    object_name = DTN_SEMANTIC_OBJECTS["connection_cabling_point"]
+    return semantic_fetch_in_rows(
+        cursor,
+        state,
+        object_name,
+        columns[object_name],
+        "CABPT_INT_ID",
+        cabpt_ids,
+        "semantic_cabling_peer_cacp_by_cabpt",
+        query_notes,
+    )
+
+
+def semantic_fetch_in_rows(
+    cursor: object,
+    state: RunState,
+    object_name: str,
+    columns: list[str],
+    column: str,
+    values: list[str],
+    logical_name: str,
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if not values:
+        return []
+    selected = semantic_select_list("", columns)
+    placeholders = semantic_placeholders(len(values))
+    where_sql = f"TO_VARCHAR({quote_identifier(column)}) IN ({placeholders})"
+    return semantic_fetch_where_rows(
+        cursor, state, object_name, selected, where_sql, tuple(values), logical_name, query_notes
+    )
+
+
+def semantic_fetch_where_rows(
+    cursor: object,
+    state: RunState,
+    object_name: str,
+    selected: str,
+    where_sql: str,
+    params: tuple[object, ...],
+    logical_name: str,
+    query_notes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    qualified = qualified_object(state.config.database, state.config.schema, object_name)
+    count, count_query_id = execute_count(
+        cursor,
+        f"SELECT COUNT(*) AS MATCH_COUNT FROM {qualified} WHERE {where_sql}",
+        params,
+        state,
+        "write_dtn_semantic_probe",
+        f"{logical_name}_count",
+    )
+    query_notes.append(
+        {"label": f"{logical_name}_count", "query_id": count_query_id, "count": count}
+    )
+    if count <= 0 or count > state.config.semantic_fetch_row_limit:
+        return []
+    result = execute_rows(
+        cursor,
+        f"SELECT {selected} FROM {qualified} WHERE {where_sql} LIMIT %s OFFSET %s",
+        (*params, state.config.semantic_fetch_row_limit, 0),
+        state,
+        "write_dtn_semantic_probe",
+        f"{logical_name}_fetch",
+    )
+    query_notes.append({"label": f"{logical_name}_fetch", "query_id": result.query_id})
+    return result.rows
+
+
+def semantic_placeholders(count: int) -> str:
+    return ", ".join("%s" for _ in range(count))
+
+
+def dtn_semantic_probe_payload(
+    state: RunState,
+    rows: Mapping[str, list[dict[str, object]]],
+    seed_ids: Mapping[str, list[str]],
+    content_candidates: list[dict[str, object]],
+    blockers: list[dict[str, object]],
+    query_notes: list[dict[str, object]],
+) -> dict[str, object]:
+    counts = semantic_counts(rows, content_candidates, blockers)
+    safe_candidates = [
+        {key: value for key, value in candidate.items() if key != "_value"}
+        for candidate in content_candidates
+    ]
+    dwdm_context = semantic_dwdm_context(rows, seed_ids, query_notes, blockers, state.config)
+    classification = dtn_relation_classification(state, counts, seed_ids, dwdm_context)
+    snapshot = {
+        "run_id": state.config.run_id,
+        "service_id": state.config.service_id,
+        "source": f"{state.config.database}.{state.config.schema}",
+        "target": {
+            "site_code": state.config.semantic_site_code,
+            "device_token": state.config.semantic_device_token,
+        },
+        "raw_unrestricted_values_written": False,
+        "content_candidates": safe_candidates,
+        "counts": counts,
+        "dwdm_adjacency": dwdm_context,
+        "seed_ids": dict(seed_ids),
+        "blockers": blockers,
+        "query_notes": query_notes,
+        "samples": {
+            name: sanitize_sample_rows(sample_rows, state.config.probe_sample_row_limit)
+            for name, sample_rows in rows.items()
+        },
+    }
+    return {"snapshot": snapshot, "classification": classification}
+
+
+def semantic_counts(
+    rows: Mapping[str, list[dict[str, object]]],
+    content_candidates: list[dict[str, object]],
+    blockers: list[dict[str, object]],
+) -> dict[str, int]:
+    return {
+        "service_transmission_rows": len(rows.get("service_transmission", [])),
+        "cp_seed_rows": len(rows.get("content_position_seed", [])),
+        "ccp_content_candidate_count": len(content_candidates),
+        "device_rows_by_actual_bearer_content": len(
+            rows.get("content_connection_point_devices", [])
+        ),
+        "ashr1_dtn_device_rows": len(rows.get("ashr1_dtn_device_rows", [])),
+        "dtn_device_rows": len(rows.get("dtn_device_rows", [])),
+        "dtn_cacp_rows": len(rows.get("dtn_cacp_rows", [])),
+        "blank_cabpt_rows": semantic_blank_cabpt_count(rows.get("dtn_cacp_rows", [])),
+        "nonblank_cabpt_rows": semantic_nonblank_cabpt_count(rows.get("dtn_cacp_rows", [])),
+        "dtn_cabling_rows": len(rows.get("dtn_cabling_rows", [])),
+        "cabling_peer_cacp_rows": len(rows.get("cabling_peer_cacp_rows", [])),
+        "distinct_site_count": len(semantic_site_count_summary(rows.get("dtn_device_rows", []))),
+        "blocker_count": len(blockers),
+    }
+
+
+def semantic_blank_cabpt_count(rows: list[dict[str, object]]) -> int:
+    return sum(1 for row in rows if not semantic_text(row.get("CABPT_INT_ID")))
+
+
+def semantic_nonblank_cabpt_count(rows: list[dict[str, object]]) -> int:
+    return sum(1 for row in rows if semantic_text(row.get("CABPT_INT_ID")))
+
+
+def semantic_site_count_summary(rows: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        site = semantic_text(row.get("NEP__NEPART_SITE_CODE")) or semantic_text(
+            row.get("CCP__SITE_CODE")
+        )
+        key = site or "<blank>"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def semantic_dwdm_context(
+    rows: Mapping[str, list[dict[str, object]]],
+    seed_ids: Mapping[str, list[str]],
+    query_notes: list[dict[str, object]],
+    blockers: list[dict[str, object]],
+    config: LiveConfig,
+) -> dict[str, object]:
+    dtn_cabpt_ids = [value for value in seed_ids.get("CABPT_INT_ID", []) if value]
+    usable_pair_count = semantic_usable_endpoint_pair_count(
+        dtn_cabpt_ids,
+        rows.get("dtn_cabling_rows", []),
+        rows.get("cabling_peer_cacp_rows", []),
+    )
+    counts = semantic_counts(rows, [], blockers)
+    fanout_limit_exceeded = semantic_fanout_limit_exceeded(query_notes, config)
+    decision = semantic_dwdm_decision(counts, usable_pair_count, fanout_limit_exceeded)
+    return {
+        "decision": decision,
+        "usable_endpoint_pair_count": usable_pair_count,
+        "fanout_limit_exceeded": fanout_limit_exceeded,
+        "site_count_summary": semantic_site_count_summary(rows.get("dtn_device_rows", [])),
+        "decision_reason": semantic_dwdm_decision_reason(
+            counts, usable_pair_count, fanout_limit_exceeded, decision
+        ),
+    }
+
+
+def semantic_usable_endpoint_pair_count(
+    dtn_cabpt_ids: list[str],
+    cabling_rows: list[dict[str, object]],
+    peer_cacp_rows: list[dict[str, object]],
+) -> int:
+    dtn_ids = set(dtn_cabpt_ids)
+    peer_ids = {
+        semantic_text(row.get("CABPT_INT_ID"))
+        for row in peer_cacp_rows
+        if semantic_text(row.get("CABPT_INT_ID"))
+    } - dtn_ids
+    pairs: set[tuple[str, str]] = set()
+    for row in cabling_rows:
+        a_id = semantic_text(row.get("A_CABPT_INT_ID"))
+        b_id = semantic_text(row.get("B_CABPT_INT_ID"))
+        if not a_id or not b_id or a_id == b_id:
+            continue
+        if (a_id in dtn_ids and b_id in peer_ids) or (b_id in dtn_ids and a_id in peer_ids):
+            first_id, second_id = sorted((a_id, b_id))
+            pairs.add((first_id, second_id))
+    return len(pairs)
+
+
+def semantic_fanout_limit_exceeded(
+    query_notes: list[dict[str, object]], config: LiveConfig
+) -> bool:
+    return any(
+        int_or_zero(note.get("count")) > config.semantic_fetch_row_limit
+        for note in query_notes
+        if "count" in note
+    )
+
+
+def semantic_dwdm_decision(
+    counts: Mapping[str, int], usable_pair_count: int, fanout_limit_exceeded: bool
+) -> str:
+    if fanout_limit_exceeded:
+        return "OWNER_APPROVAL_REQUIRED"
+    if counts.get("blocker_count", 0) > 0:
+        return "INCOMPLETE"
+    if (
+        counts.get("dtn_device_rows", 0) > 0
+        and counts.get("nonblank_cabpt_rows", 0) > 0
+        and counts.get("dtn_cabling_rows", 0) > 0
+        and counts.get("cabling_peer_cacp_rows", 0) > 0
+        and usable_pair_count > 0
+    ):
+        return "PROVEN_DWDM_ADJACENCY"
+    if counts.get("dtn_device_rows", 0) > 0 and (
+        counts.get("nonblank_cabpt_rows", 0) == 0 or counts.get("dtn_cabling_rows", 0) == 0
+    ):
+        return "TRANSMISSION_ONLY_FANOUT"
+    return "INCOMPLETE"
+
+
+def semantic_dwdm_decision_reason(
+    counts: Mapping[str, int],
+    usable_pair_count: int,
+    fanout_limit_exceeded: bool,
+    decision: str,
+) -> str:
+    if fanout_limit_exceeded:
+        return "fanout exceeds bounded semantic fetch limit"
+    if decision == "PROVEN_DWDM_ADJACENCY":
+        return f"nonblank CABPT + cabling + peer CACP proven; usable_endpoint_pair_count={usable_pair_count}"
+    if decision == "TRANSMISSION_ONLY_FANOUT":
+        return "DTN rows found but nonblank CABPT/cabling path not proven"
+    if counts.get("blocker_count", 0) > 0:
+        return "required object or column unavailable"
+    return "bounded probe did not prove cabling-backed DTN adjacency"
+
+
+def dtn_relation_classification(
+    state: RunState,
+    counts: Mapping[str, int],
+    seed_ids: Mapping[str, list[str]],
+    dwdm_context: Mapping[str, object],
+) -> dict[str, object]:
+    found = {
+        "service_transmission": counts.get("service_transmission_rows", 0) > 0,
+        "content_position_seed": counts.get("cp_seed_rows", 0) > 0,
+        "content_connection_point_devices": counts.get("device_rows_by_actual_bearer_content", 0)
+        > 0,
+        "ashr1_dtn_content_connection_point": counts.get("ashr1_dtn_device_rows", 0) > 0,
+        "connection_cabling_point": counts.get("dtn_cacp_rows", 0) > 0,
+        "cabling": counts.get("dtn_cabling_rows", 0) > 0,
+        "cabling_peer_cacp": counts.get("cabling_peer_cacp_rows", 0) > 0,
+    }
+    return {
+        "run_id": state.config.run_id,
+        "service_id": state.config.service_id,
+        "seed_ids": dict(seed_ids),
+        "counts": dict(counts),
+        "dwdm_adjacency": dict(dwdm_context),
+        "candidate_relation_sources_found": found,
+        "business_proof": {
+            "dtn_endpoint_relation_proof": INCOMPLETE,
+            "route_order_proof": INCOMPLETE,
+            "sorter_change_allowed": False,
+            "negative_evidence_allowed": False,
+            "reason": (
+                "Candidate exact-ID and cabling rows exist only as candidate evidence; "
+                "DTN edge semantics remain unapproved."
+            ),
+        },
+        "recommended_next_action": (
+            "Review or approve a DTN edge semantics registry entry before sorter changes."
+        ),
+    }
+
+
+def semantic_probe_candidate_scan_pass(probe: dict[str, object] | None) -> bool:
+    if not probe:
+        return False
+    if "services" in probe:
+        services = probe.get("services", [])
+        if not isinstance(services, list):
+            return False
+        return any(
+            semantic_service_decision(service) == "PROVEN_DWDM_ADJACENCY"
+            for service in services
+            if isinstance(service, dict)
+        )
+    classification = probe.get("classification", {})
+    if not isinstance(classification, dict):
+        return False
+    sources = classification.get("candidate_relation_sources_found", {})
+    return isinstance(sources, dict) and all(bool(value) for value in sources.values())
+
+
+def semantic_service_decision(probe: dict[str, object]) -> str:
+    classification = probe.get("classification", {})
+    if not isinstance(classification, dict):
+        return "INCOMPLETE"
+    dwdm = classification.get("dwdm_adjacency", {})
+    if not isinstance(dwdm, dict):
+        return "INCOMPLETE"
+    decision = str(dwdm.get("decision", "INCOMPLETE"))
+    return decision if decision in DWDM_ADJACENCY_DECISIONS else "INCOMPLETE"
+
+
+def dwdm_adjacency_service_summary(
+    state: RunState, probes: list[dict[str, object]]
+) -> dict[str, object]:
+    services = [dwdm_service_summary_row(probe) for probe in probes]
+    return {
+        "run_id": state.config.run_id,
+        "source": f"{state.config.database}.{state.config.schema}",
+        "service_ids": [row["service_id"] for row in services],
+        "target": {
+            "site_code": state.config.semantic_site_code,
+            "device_token": state.config.semantic_device_token,
+        },
+        "raw_unrestricted_values_written": False,
+        "snapshot_only": True,
+        "business_proof": {
+            "route_order_proof": INCOMPLETE,
+            "sorter_change_allowed": False,
+            "negative_evidence_allowed": False,
+            "reason": "Six-service DWDM snapshot is candidate evidence until semantics review.",
+        },
+        "services": services,
+    }
+
+
+def dwdm_service_summary_row(probe: dict[str, object]) -> dict[str, object]:
+    snapshot = probe.get("snapshot", {})
+    classification = probe.get("classification", {})
+    if not isinstance(snapshot, dict) or not isinstance(classification, dict):
+        return {"service_id": "", "decision": "INCOMPLETE"}
+    counts = classification.get("counts", {})
+    dwdm = classification.get("dwdm_adjacency", {})
+    if not isinstance(counts, dict):
+        counts = {}
+    if not isinstance(dwdm, dict):
+        dwdm = {}
+    return {
+        "service_id": str(classification.get("service_id", snapshot.get("service_id", ""))),
+        "decision": str(dwdm.get("decision", "INCOMPLETE")),
+        "decision_reason": str(dwdm.get("decision_reason", "")),
+        "service_rows": int_or_zero(counts.get("service_transmission_rows")),
+        "content_position_seed_rows": int_or_zero(counts.get("cp_seed_rows")),
+        "dtn_device_rows": int_or_zero(counts.get("dtn_device_rows")),
+        "dtn_cacp_rows": int_or_zero(counts.get("dtn_cacp_rows")),
+        "blank_cabpt_rows": int_or_zero(counts.get("blank_cabpt_rows")),
+        "nonblank_cabpt_rows": int_or_zero(counts.get("nonblank_cabpt_rows")),
+        "dtn_cabling_rows": int_or_zero(counts.get("dtn_cabling_rows")),
+        "peer_cacp_rows": int_or_zero(counts.get("cabling_peer_cacp_rows")),
+        "distinct_site_count": int_or_zero(counts.get("distinct_site_count")),
+        "site_count_summary": dwdm.get("site_count_summary", {}),
+        "usable_endpoint_pair_count": int_or_zero(dwdm.get("usable_endpoint_pair_count")),
+        "fanout_limit_exceeded": bool(dwdm.get("fanout_limit_exceeded")),
+    }
+
+
+def dwdm_adjacency_decision_matrix(
+    state: RunState, service_summary: Mapping[str, object]
+) -> dict[str, object]:
+    raw_services = service_summary.get("services", [])
+    services = (
+        [row for row in raw_services if isinstance(row, dict)]
+        if isinstance(raw_services, list)
+        else []
+    )
+    decision_counts: dict[str, int] = {}
+    for row in services:
+        decision = str(row.get("decision", "INCOMPLETE"))
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+    return {
+        "run_id": state.config.run_id,
+        "generated_at": utc_now(),
+        "decision_counts": decision_counts,
+        "total_service_count": len(services),
+        "proven_service_ids": [
+            row.get("service_id")
+            for row in services
+            if row.get("decision") == "PROVEN_DWDM_ADJACENCY"
+        ],
+        "transmission_only_fanout_service_ids": [
+            row.get("service_id")
+            for row in services
+            if row.get("decision") == "TRANSMISSION_ONLY_FANOUT"
+        ],
+        "owner_approval_required_service_ids": [
+            row.get("service_id")
+            for row in services
+            if row.get("decision") == "OWNER_APPROVAL_REQUIRED"
+        ],
+        "incomplete_service_ids": [
+            row.get("service_id") for row in services if row.get("decision") == "INCOMPLETE"
+        ],
+        "recommended_next_action": dwdm_recommended_next_action(decision_counts),
+        "sorter_change_allowed": False,
+        "negative_evidence_allowed": False,
+    }
+
+
+def dwdm_recommended_next_action(decision_counts: Mapping[str, int]) -> str:
+    if decision_counts.get("OWNER_APPROVAL_REQUIRED", 0):
+        return "REQUEST_OWNER_APPROVAL"
+    if decision_counts.get("INCOMPLETE", 0):
+        return "STOP_EXACT_BLOCKER"
+    if decision_counts.get("PROVEN_DWDM_ADJACENCY", 0):
+        return "REVIEW_SEMANTICS_BEFORE_SORTER_CHANGE"
+    return "NO_DEEP_FETCH_JUSTIFIED"
+
+
+def dwdm_predicate_probe_snapshots(
+    state: RunState, service_summary: Mapping[str, object]
+) -> list[dict[str, object]]:
+    snapshots: list[dict[str, object]] = []
+    raw_services = service_summary.get("services", [])
+    services = raw_services if isinstance(raw_services, list) else []
+    for row in services:
+        if not isinstance(row, dict):
+            continue
+        service_id = str(row.get("service_id", ""))
+        exact_hit_count = int_or_zero(row.get("dtn_device_rows"))
+        snapshots.append(
+            predicate_probe_snapshot_payload(
+                run_id=state.config.run_id,
+                source_namespace=f"{state.config.database}.{state.config.schema}",
+                object_name="DWDM_ADJACENCY_SERVICE_SUMMARY",
+                predicate_field="SERVICE_ID",
+                predicate_domain="DWDM_ADJACENCY",
+                predicate_ref=stable_digest(service_id),
+                exact_hit_count=exact_hit_count,
+                sample_rows=[],
+                count_request_id="",
+                sample_request_id="",
+                elapsed_ms=0,
+                row_limit_used=state.config.probe_sample_row_limit,
+                limits=probe_limits(state.config),
+                error=""
+                if row.get("decision") != "INCOMPLETE"
+                else str(row.get("decision_reason")),
+            )
+        )
+    return snapshots
+
+
+def semantic_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        return text[:-2]
+    return text
+
+
+def collect_predicate_probe_snapshots(cursor: object, state: RunState) -> list[dict[str, object]]:
+    snapshots: list[dict[str, object]] = []
+    for object_name, proof_columns in sorted(state.proof_by_object.items()):
+        check_deadline(state, "write_probe_snapshots", object_name)
+        snapshots.extend(probe_object_predicates(cursor, state, proof_columns))
+    return snapshots
+
+
+def probe_object_predicates(
+    cursor: object,
+    state: RunState,
+    proof_columns: list[ColumnProfile],
+) -> list[dict[str, object]]:
+    snapshots: list[dict[str, object]] = []
+    for predicate_column in proof_columns:
+        domain = classify_structured_id_column(
+            predicate_column, Searchability("SEARCHABLE", True, "PASS")
+        ).id_domain
+        nodes = [node for node in state.seed_scan.seed_nodes.values() if node.id_domain == domain]
+        for node in nodes:
+            snapshots.append(
+                probe_single_predicate(cursor, state, predicate_column, proof_columns, node)
+            )
+    return snapshots
+
+
+def probe_single_predicate(
+    cursor: object,
+    state: RunState,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    node: IdNode,
+) -> dict[str, object]:
+    started = time.monotonic()
+    try:
+        count, count_query_id = execute_probe_count(cursor, state, predicate_column, node)
+        sample_rows, sample_query_id = sample_probe_rows(
+            cursor, state, predicate_column, proof_columns, node, count
+        )
+        return predicate_probe_snapshot_payload(
+            run_id=state.config.run_id,
+            source_namespace=f"{state.config.database}.{state.config.schema}",
+            object_name=predicate_column.object_name,
+            predicate_field=predicate_column.column_name,
+            predicate_domain=node.id_domain,
+            predicate_ref=node.key,
+            exact_hit_count=count,
+            sample_rows=sample_rows,
+            count_request_id=count_query_id,
+            sample_request_id=sample_query_id,
+            elapsed_ms=elapsed_ms(started),
+            row_limit_used=state.config.probe_sample_row_limit,
+            limits=probe_limits(state.config),
+        )
+    except Exception as exc:
+        return predicate_probe_snapshot_payload(
+            run_id=state.config.run_id,
+            source_namespace=f"{state.config.database}.{state.config.schema}",
+            object_name=predicate_column.object_name,
+            predicate_field=predicate_column.column_name,
+            predicate_domain=node.id_domain,
+            predicate_ref=node.key,
+            exact_hit_count=-1,
+            sample_rows=[],
+            count_request_id="",
+            sample_request_id="",
+            elapsed_ms=elapsed_ms(started),
+            row_limit_used=state.config.probe_sample_row_limit,
+            limits=probe_limits(state.config),
+            error=str(exc),
+        )
+
+
+def execute_probe_count(
+    cursor: object,
+    state: RunState,
+    predicate_column: ColumnProfile,
+    node: IdNode,
+) -> tuple[int, str]:
+    check_deadline(state, "write_probe_snapshots", predicate_column.object_name)
+    predicate_sql = build_count_sql(
+        state.config.database,
+        state.config.schema,
+        predicate_column.object_name,
+        predicate_column.column_name,
+        1,
+    )
+    return execute_count(
+        cursor,
+        predicate_sql,
+        (predicate_value(node, predicate_column),),
+        state,
+        "write_probe_snapshots",
+        "probe_exact_count",
+    )
+
+
+def sample_probe_rows(
+    cursor: object,
+    state: RunState,
+    predicate_column: ColumnProfile,
+    proof_columns: list[ColumnProfile],
+    node: IdNode,
+    count: int,
+) -> tuple[list[dict[str, object]], str]:
+    decision = probe_decision(count, probe_limits(state.config))
+    if decision in {"COUNT_ONLY", "OWNER_APPROVAL_REQUIRED", "SKIP"}:
+        return [], ""
+    check_deadline(state, "write_probe_snapshots", predicate_column.object_name)
+    result = execute_rows(
+        cursor,
+        build_exact_fetch_sql(state.config, predicate_column, proof_columns),
+        (
+            predicate_value(node, predicate_column),
+            state.config.probe_sample_row_limit,
+            0,
+        ),
+        state,
+        "write_probe_snapshots",
+        "probe_exact_sample",
+    )
+    return result.rows[: state.config.probe_sample_row_limit], result.query_id
+
+
+def elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def probe_limits(config: LiveConfig) -> SnapshotLimits:
+    return SnapshotLimits(
+        sample_row_limit=config.probe_sample_row_limit,
+        deep_fetch_row_limit=config.page_size * config.max_pages_per_predicate,
+    )
+
+
 def phase_write_final_status(state: RunState) -> None:
     statuses = status_payload_for_state(state)
     state.status_split = statuses
@@ -894,8 +2126,29 @@ def status_payload_for_state(state: RunState) -> dict[str, object]:
         "IC-388612 route order proof",
     ):
         set_status(statuses, name, INCOMPLETE, "phase not completed in this run", [])
-    set_status(statuses, "Candidate relation scan", INCOMPLETE, "candidate scan not completed", [])
-    set_status(statuses, "Edge semantics registry", INCOMPLETE, "semantics not reviewed", [])
+    if state.semantic_probe is not None:
+        candidate_status = (
+            PASS if semantic_probe_candidate_scan_pass(state.semantic_probe) else INCOMPLETE
+        )
+        set_status(
+            statuses,
+            "Candidate relation scan",
+            candidate_status,
+            "bounded DTN semantic candidate probe completed",
+            [],
+        )
+        set_status(
+            statuses,
+            "Edge semantics registry",
+            INCOMPLETE,
+            "DTN edge semantics not reviewed or approved",
+            [],
+        )
+    else:
+        set_status(
+            statuses, "Candidate relation scan", INCOMPLETE, "candidate scan not completed", []
+        )
+        set_status(statuses, "Edge semantics registry", INCOMPLETE, "semantics not reviewed", [])
     set_status(
         statuses, "Schema drift invalidation", PASS, "hashes computed for available artifacts", []
     )
@@ -1015,11 +2268,13 @@ def status_names_for_incomplete_phase(phase: str) -> tuple[str, ...]:
         "discover_views_metadata": ("INCA_SRC schema discovery",),
         "discover_dependencies_optional": ("Schema/profile catalog",),
         "write_schema_profile": ("Schema/profile catalog",),
+        "write_probe_snapshots": ("Bounded JSON evidence snapshots",),
         "build_structured_id_dictionary": (
             "Manifest-boundary avoidance",
             "Structured ID dictionary",
         ),
         "extract_service_seed_ids": ("IC-388612 ID extraction",),
+        "write_dtn_semantic_probe": ("Candidate relation scan", "Edge semantics registry"),
         "run_exact_id_overlap_scan": ("Exact-ID overlap scan", "Candidate relation scan"),
         "run_graph_closure": ("Evidence graph closure",),
         "write_final_status": ("Schema drift invalidation",),
@@ -1058,6 +2313,18 @@ def phase_artifact_paths(state: RunState, phase: str) -> list[str]:
             "edge_semantics_registry.csv",
         ],
         "run_graph_closure": ["graph_closure_summary.json"],
+        "write_probe_snapshots": [
+            "source_manifest.json",
+            "profile_snapshots.jsonl",
+            "predicate_probe_snapshots.jsonl",
+            "probe_decision_matrix.json",
+        ],
+        "write_dtn_semantic_probe": [
+            "dtn_semantic_probe_snapshot.json",
+            "dtn_relation_classification.json",
+            "dwdm_adjacency_service_summary.json",
+            "dwdm_adjacency_decision_matrix.json",
+        ],
         "write_final_status": ["status_split.json", "run_manifest.json"],
     }
     return [str(state.run_dir / item) for item in mapping.get(phase, [])]
@@ -1365,6 +2632,72 @@ def append_csv_row(path: Path, fieldnames: tuple[str, ...], row: dict[str, objec
         if new_file:
             writer.writeheader()
         writer.writerow(row)
+
+
+def write_jsonl_artifact(path: Path, rows: Iterable[Mapping[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), sort_keys=True))
+            handle.write("\n")
+
+
+def write_source_manifest(state: RunState) -> None:
+    write_json_artifact(
+        state.run_dir / "source_manifest.json",
+        source_manifest_payload(
+            run_id=state.config.run_id,
+            source_kind="snowflake",
+            source_name=f"{state.config.database}.{state.config.schema}",
+            auth_context={
+                "connection_name": state.config.connection_name,
+                "secret_material_written": False,
+                "semantic_service_ids": list(state.config.semantic_service_ids),
+            },
+            tool_version=state.config.framework_commit_sha,
+            limits=probe_limits(state.config),
+        ),
+    )
+
+
+def write_profile_snapshots(state: RunState) -> None:
+    objects = object_rows_by_name(state.metadata.get("tables", []))
+    fields_by_object: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for profile in state.profiles:
+        fields_by_object[profile.object_name].append(
+            {
+                "name": profile.column_name,
+                "data_type": profile.data_type,
+                "numeric_scale": profile.numeric_scale,
+                "is_nullable": profile.is_nullable,
+                "ordinal_position": profile.ordinal_position,
+            }
+        )
+    snapshots = [
+        profile_snapshot_payload(
+            run_id=state.config.run_id,
+            source_namespace=f"{state.config.database}.{state.config.schema}",
+            object_name=object_name,
+            object_type=str(objects.get(object_name, {}).get("TABLE_TYPE", "")),
+            row_count=optional_int(objects.get(object_name, {}).get("ROW_COUNT")),
+            fields=fields,
+        )
+        for object_name, fields in sorted(fields_by_object.items())
+    ]
+    write_jsonl_artifact(state.run_dir / "profile_snapshots.jsonl", snapshots)
+
+
+def object_rows_by_name(rows: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    return {str(row.get("TABLE_NAME", "")): row for row in rows}
+
+
+def optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value))
+    except ValueError:
+        return None
 
 
 def append_command_log(state: RunState, text: str) -> None:

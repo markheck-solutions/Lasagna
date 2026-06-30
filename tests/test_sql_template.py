@@ -43,6 +43,8 @@ def test_sql_template_contains_route_qids_and_no_pm_seed_tables() -> None:
         "DP_SDP",
         "ROUTE_ORDER_METADATA",
         "TRANSMISSION_METADATA",
+        "TRANSPORT_DEVICE_ADJACENCY",
+        "DP_ENDPOINT_ROLE",
         "BO_FIBERS",
     ):
         assert qid in template
@@ -54,8 +56,103 @@ def test_route_order_metadata_is_scoped_to_exported_route_paths() -> None:
     template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
 
     assert "CREATE OR REPLACE TEMP TABLE prod_route_order_relevant_edges AS" in template
-    assert "WHERE qid IN ('TRUNK_ODF', 'DEVICE', 'DP_SDP')" in template
+    assert "WHERE qid IN ('TRUNK_ODF', 'DEVICE')" in template
     assert "JOIN prod_route_order_relevant_edges relevant_edges" in template
     assert "relevant_edges.ROUTE_PATH = walk.edge_name" in template
+    assert "WHERE walk.edge_name IS NOT NULL" in template
     assert "CREATE OR REPLACE TEMP TABLE prod_site_location_rows AS" in template
+    assert "A_SITE_TYPE_NUMBER" in template
+    assert "B_SITE_TYPE_NUMBER" in template
+    assert "AND a_site.SITE_TYPE = COALESCE(pcg.A_SITE_TYPE, tx.A_SITE_TYPE)" in template
+    assert "AND b_site.SITE_TYPE = COALESCE(pcg.B_SITE_TYPE, tx.B_SITE_TYPE)" in template
     assert "SELECT DISTINCT\n    ranked.service_id AS SERVICE_ID" in template
+
+
+def test_transport_device_adjacency_uses_recursive_ccp_endpoint_facts() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+
+    assert "CREATE OR REPLACE TEMP TABLE prod_transport_device_endpoint_rows AS" in template
+    assert "CREATE OR REPLACE TEMP TABLE prod_transport_device_adjacency_rows AS" in template
+    assert "ccp.CONTENT = walk.edge_name" in template
+    assert "ccp.CONNPT_INT_ID" in template
+    assert "device_row_keys AS" in template
+    assert "DEVICE_CONTENT_INT_ID" in template
+    assert "AND device_row_keys.device_site_code = endpoint_sites.device_site_code" in template
+    assert "AND device_row_keys.device_slot = endpoint_sites.slot" in template
+    assert "device_row_keys.device_subslot = endpoint_sites.connection_point_nr" in template
+    assert "device_row_keys.device_platform_family <> 'DTN'" in template
+    assert "T_PORT_TO_CONNECTION_POINT_NR" in template
+    assert "content_position_endpoint_candidates AS" in template
+    assert "CONTENT_POSITION_TO_LINE_ENDPOINT" in template
+    assert "child_parent.CHILD_INT_ID = device_row_keys.device_content_int_id" in template
+    assert "edge_parent.CHILD_INT_ID = child_parent.TRANSMISSION_INTID" in template
+    assert "edge_parent.BFK_TRANSMISSION = walk.edge_name" in template
+    assert "tx.BPK_TRANSMISSION = endpoint_sites.edge_name" in template
+    assert "tx.BPK_TRANSMISSION = walk.edge_name" in template
+    assert "device_row_keys.device_site_code IN (tx.A_SITE_CODE, tx.B_SITE_CODE)" in template
+    assert "endpoint_sites.level_no > 1" in template
+    assert "walk.level_no > 1" in template
+    assert "device_row_keys.device_subslot = endpoint_sites.subslot" in template
+    assert "dwdm_cabling_endpoint_candidates AS" in template
+    assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
+    assert (
+        "TO_VARCHAR(endpoint_cacp.CONNPT_INT_ID) = TO_VARCHAR(endpoint_sites.connpt_int_id)"
+        in template
+    )
+    assert "endpoint_cacp.CABPT_INT_ID IS NOT NULL" in template
+    assert "JOIN prod_access_db.inca_src.V_T_INCATNT_CABLING_CURRENT cab" in template
+    assert "peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID" in template
+    assert "EXACT_DEVICE_PORT_MATCH" in template
+    assert "TL_DEVICE_SHARED_HANDOFF" not in template
+    assert "shared_handoff_unambiguous_edges AS" not in template
+    assert "RAW_ENDPOINT_SITE_COUNT" not in template
+    assert "endpoint_row_count = 2" in template
+    assert "endpoint_site_count = 2" in template
+    assert "TRANSPORT_DEVICE_ADJACENCY" in template
+    assert "ENDPOINT_PROOF_SOURCE" in template
+    assert "PORT_MATCH_RULE" in template
+    assert "PORT_MATCH_SOURCE_VIEW" in template
+    assert "PORT_MATCH_SOURCE_IDS" in template
+    assert "PLATFORM_FAMILY" in template
+    assert "ENDPOINT_ROW_COUNT" in template
+    assert "ENDPOINT_1_DEVICE_SLOT" in template
+    assert "ENDPOINT_1_DEVICE_SUBSLOT" in template
+    assert "ENDPOINT_1_CCP_CONNECTION_POINT_NR" in template
+    assert "ENDPOINT_1_CONNECTION_POINT_NR" in template
+    assert "ENDPOINT_1_SLOT" in template
+    assert "ENDPOINT_1_SUBSLOT" in template
+    assert "PATH_TEXT" in template
+
+
+def test_dwdm_adjacency_requires_cabling_backed_dtn_not_fanout() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+
+    assert "device_row_keys.device_platform_family <> 'DTN'" in template
+    assert "dwdm_cabling_endpoint_candidates AS" in template
+    assert "AND device_row_keys.device_platform_family = 'DTN'" in template
+    assert "WHERE endpoint_sites.connpt_int_id IS NOT NULL" in template
+    assert "endpoint_cacp.CABPT_INT_ID IS NOT NULL" in template
+    assert "JOIN prod_access_db.inca_src.V_T_INCATNT_CABLING_CURRENT cab" in template
+    assert "peer_cacp.CABPT_INT_ID IS NOT NULL" in template
+    assert "peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID" in template
+    assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
+    assert "endpoint_row_count = 2" in template
+    assert "endpoint_site_count = 2" in template
+
+
+def test_dp_sdp_rows_use_normalized_service_id_key() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+
+    assert "dp.SERVICE_ID_KEY AS SERVICE_ID" in template
+    assert "dp.CONTENT AS SERVICE_ID" not in template
+
+
+def test_dp_endpoint_roles_require_unique_structured_proof() -> None:
+    template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+
+    assert "CREATE OR REPLACE TEMP TABLE prod_dp_endpoint_role_candidates AS" in template
+    assert "CREATE OR REPLACE TEMP TABLE prod_dp_endpoint_role_rows AS" in template
+    assert "DP_EXACT_SITE_IDENTITY" in template
+    assert "DP_SITE_CODE_TRANSPORT_ENDPOINT" in template
+    assert "SAME_PRIORITY_CANDIDATE_COUNT = 1" in template
+    assert "INSERT INTO prod_all SELECT 'DP_ENDPOINT_ROLE'" in template

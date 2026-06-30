@@ -154,6 +154,11 @@ condition makes it unnecessary.
   closure.
 - Metadata-only mode must not write `negative_evidence_ledger_entry.json`.
 - Seed-only mode must not run graph closure.
+- Probe-only and snapshot-only modes must not run graph closure.
+- Probe-only and snapshot-only modes must not write
+  `negative_evidence_ledger_entry.json`.
+- Probe-only and snapshot-only modes may write bounded JSON count/sample
+  artifacts, but those artifacts are candidate evidence only.
 - Unknown semantics paths cannot change sorter behavior.
 - Exact-ID overlap alone cannot prove route continuity.
 - Context-only fields cannot create graph nodes.

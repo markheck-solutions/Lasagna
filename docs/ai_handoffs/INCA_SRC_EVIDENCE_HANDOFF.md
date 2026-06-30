@@ -4,7 +4,9 @@ Read first:
 
 1. `docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md`
 2. `docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md`
-3. This file
+3. `docs/runbooks/BOUNDED_JSON_EVIDENCE_SNAPSHOT_PROTOCOL.md`
+4. `docs/contracts/BOUNDED_JSON_EVIDENCE_SNAPSHOT_CONTRACT.md`
+5. This file
 
 Operational rules:
 
@@ -16,6 +18,7 @@ Operational rules:
 - Do not use context-only fields as proof.
 - Do not approve edge semantics yourself.
 - Do not write negative evidence from metadata-only or incomplete runs.
+- Before any full rerun after fanout, use bounded JSON evidence snapshots.
 - Run `python -m pytest tests/test_inca_src_discovery.py -q` before live
   evidence.
 - Run `python scripts/quality_gates/run_local_validation.py` before claiming
@@ -39,7 +42,8 @@ Current state:
 
 Next step:
 
-Run full live `IC-388612` evidence collection. Do not patch sorter logic. Do not
+Diagnose the current fanout with bounded JSON evidence snapshots before any new
+full live `IC-388612` evidence collection. Do not patch sorter logic. Do not
 create or change `PORT_MATCH_RULE`.
 
 Required preflight from Personal PC:
@@ -48,7 +52,13 @@ Required preflight from Personal PC:
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\mheck\.codex\pikvm\Test-WorkPcBackendAccess.ps1"
 ```
 
-Full run command on Work PC:
+Probe command on Work PC:
+
+```powershell
+python scripts\work_pc\collect_inca_src_evidence.py --service-id IC-388612 --connection bk03716.eu-central-1 --phase probe-only
+```
+
+Full run command on Work PC, only after probe review:
 
 ```powershell
 python scripts\work_pc\collect_inca_src_evidence.py --service-id IC-388612 --connection bk03716.eu-central-1 --phase full
