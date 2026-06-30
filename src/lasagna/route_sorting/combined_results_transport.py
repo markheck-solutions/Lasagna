@@ -553,8 +553,9 @@ def _find_unique_path_covering_sites(
             f"transport adjacency path not proven for row site(s): {', '.join(missing_sites)}"
         )
 
-    if len(required_sites) <= 1:
-        return sorted(required_sites)
+    singleton_path = _singleton_covering_path(graph, required_sites, start_site, end_site)
+    if singleton_path is not None:
+        return singleton_path
 
     if start_site and end_site and start_site in graph and end_site in graph:
         directed_path = _unique_minimum_cost_path(
@@ -580,6 +581,31 @@ def _find_unique_path_covering_sites(
     return _unique_minimum_cost_path(path_costs)
 
 
+def _singleton_covering_path(
+    graph: SiteGraph,
+    required_sites: set[str],
+    start_site: str,
+    end_site: str,
+) -> list[str] | None:
+    if len(required_sites) > 1:
+        return None
+    if not (start_site and end_site):
+        return sorted(required_sites)
+    if start_site not in graph or end_site not in graph:
+        raise StructuredRouteContractError(
+            f"transport adjacency path not proven between {start_site} and {end_site}"
+        )
+    return _unique_minimum_cost_path(
+        _covering_path_costs_between(
+            graph,
+            required_sites,
+            start_site,
+            end_site,
+            preserve_direction=True,
+        )
+    )
+
+
 def _add_site_graph_edge(
     graph: SiteGraph,
     a_site: str,
@@ -603,23 +629,6 @@ def _transport_adjacency_proof_cost(transport_edge: TransportDeviceAdjacency) ->
     return 0
 
 
-def _has_bearer_transport_adjacency(
-    transport_edges: list[TransportDeviceAdjacency],
-    bearer: StructuredRouteEdge,
-) -> bool:
-    bearer_name = bearer.route_path.upper()
-    bearer_sites = {bearer.a_site_code, bearer.b_site_code}
-    return any(
-        transport_edge.edge_name.upper() == bearer_name
-        and {
-            transport_edge.endpoint_1_site_code,
-            transport_edge.endpoint_2_site_code,
-        }
-        == bearer_sites
-        for transport_edge in transport_edges
-    )
-
-
 def _transport_site_order(
     edges: list[StructuredRouteEdge],
     transport_device_adjacency: list[dict[str, Any]] | None,
@@ -634,8 +643,6 @@ def _transport_site_order(
 
     bearer = edges[0]
     graph: SiteGraph = {}
-    for edge in edges[1:]:
-        _add_site_graph_edge(graph, edge.a_site_code, edge.b_site_code)
     for transport_edge in transport_edges:
         _add_site_graph_edge(
             graph,
@@ -643,15 +650,6 @@ def _transport_site_order(
             transport_edge.endpoint_2_site_code,
             _transport_adjacency_proof_cost(transport_edge),
         )
-
-    missing_required_sites = required_sites - set(graph)
-    bearer_sites = {bearer.a_site_code, bearer.b_site_code}
-    if (
-        missing_required_sites
-        and missing_required_sites <= bearer_sites
-        and _has_bearer_transport_adjacency(transport_edges, bearer)
-    ):
-        _add_site_graph_edge(graph, bearer.a_site_code, bearer.b_site_code)
 
     path = _find_unique_path_covering_sites(
         graph, required_sites, bearer.a_site_code, bearer.b_site_code

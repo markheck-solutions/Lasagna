@@ -368,13 +368,6 @@ def test_structured_contract_sorts_planned_disco_from_transport_adjacency_path()
         *[
             _transport_adjacency(service_id, edge, site_path[index], site_path[index + 1])
             for index, edge in enumerate(route_edges[1:])
-            if edge
-            not in {
-                "ASH/3-ASH/4 OL01",
-                "NEO-NEO/T2 OL01",
-                "NEO-NEO/2 OL07",
-                "SANF/2-SANF OL01",
-            }
         ],
     ]
     device_site_path = [site for site in site_path if site != "NEO"]
@@ -851,6 +844,48 @@ def test_structured_contract_fails_single_unproven_transport_site() -> None:
         )
 
 
+def test_structured_contract_rejects_metadata_only_transport_graph_hops() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA X 1-BBB X 2 100G01"
+    left = "AAA-MID ODU401"
+    right = "MID-BBB ODU401"
+
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="transport adjacency path not proven for row site\\(s\\): MID",
+    ):
+        _sort_rows_by_structured_contract(
+            [
+                _row("AAA", bearer, 1, ne_info="AAA XS G40 01 G42 01"),
+                _row("MID", bearer, 1, ne_info="MID XS WS 05 WS5"),
+                _row("BBB", bearer, 1, ne_info="BBB XS G40 01 G42 01"),
+            ],
+            [
+                _metadata_between(service_id, bearer, 1, "AAA", "BBB") | {"MEDIA": "ET"},
+                _metadata_between(service_id, left, 2, "AAA", "MID"),
+                _metadata_between(service_id, right, 3, "MID", "BBB"),
+            ],
+            service_id,
+            [_transport_adjacency(service_id, bearer, "AAA", "BBB")],
+        )
+
+
+def test_structured_contract_rejects_singleton_site_disconnected_from_bearer() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA X 1-BBB X 2 100G01"
+
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="transport adjacency path not proven between AAA and BBB",
+    ):
+        _sort_rows_by_structured_contract(
+            [_row("MID", bearer, 1, ne_info="MID XS WS 05 WS5")],
+            [_metadata_between(service_id, bearer, 1, "AAA", "BBB") | {"MEDIA": "ET"}],
+            service_id,
+            [_transport_adjacency(service_id, "MID-CCC ODU401", "MID", "CCC")],
+        )
+
+
 def test_structured_contract_keeps_bearer_rows_before_same_site_local_edges() -> None:
     service_id = "IC-123456"
     bearer = "AAA X 1-BBB X 2 100G01"
@@ -1297,6 +1332,8 @@ def test_structured_contract_uses_required_row_sites_for_ic_364797_migration_bra
     ]
     transport_adjacency = [
         _transport_adjacency(service_id, bearer, "HY/I", "OSD2/I"),
+        _transport_adjacency(service_id, current_ol, "OSD/I", "OSD2/I"),
+        _transport_adjacency(service_id, migration_ol, "OSD2/I", "OSD2/Y"),
         _transport_adjacency(service_id, "HY/I-OSD2/I ODU407", "HY/I", "OSD2/I"),
         _transport_adjacency(service_id, "HY/I-OSD2/I OTUC204", "HY/I", "OSD2/I"),
     ]
@@ -1348,6 +1385,9 @@ def test_structured_contract_scopes_ic_370987_migration_to_proven_new_path() -> 
         _metadata_between(service_id, mm_sp, 5, "MM/B", "MM/SP"),
     ]
     transport_adjacency = [
+        _transport_adjacency(service_id, current_ol, "OSD/I", "OSD2/I"),
+        _transport_adjacency(service_id, migration_ol, "OSD2/I", "OSD2/X"),
+        _transport_adjacency(service_id, mm_sp, "MM/B", "MM/SP"),
         _transport_adjacency(
             service_id,
             "MM/SP-OSD2/I ODU219",
@@ -1452,6 +1492,8 @@ def test_structured_contract_sorts_ic_394531_from_device_matched_transport_hando
         _metadata_between(service_id, "CHC/2-CHC/3 OL02", 8, "CHC/2", "CHC/3"),
     ]
     transport_adjacency = [
+        _transport_adjacency(service_id, rest_loop, "REST", "REST/2"),
+        _transport_adjacency(service_id, "ASH/2-ASH/3 OL02", "ASH/2", "ASH/3"),
         _transport_adjacency(service_id, "ASH/2-ATM/2 OCGX05", "ASH/2", "ATM/2"),
         _transport_adjacency(service_id, "ASH/3-REST/2 ODU411", "ASH/3", "REST/2"),
         _transport_adjacency(
@@ -1475,7 +1517,9 @@ def test_structured_contract_sorts_ic_394531_from_device_matched_transport_hando
             "KANC/2",
             endpoint_proof_source="EXACT_DEVICE_PORT_MATCH",
         ),
+        _transport_adjacency(service_id, "CHC/2-CHC/3 OL02", "CHC/2", "CHC/3"),
         _transport_adjacency(service_id, "DENV-KANC OCGX16", "DENV", "KANC/2"),
+        _transport_adjacency(service_id, "DENV-DENV/3 OL01", "DENV", "DENV/3"),
         _transport_adjacency(service_id, "DENV-SLC/SH S900G04", "DENV/3", "SLC/SH"),
         _transport_adjacency(service_id, "PALO-SANF/2 ODU401", "PALO", "SANF/2"),
         _transport_adjacency(service_id, "PALO-SCR/CS ODU421", "PALO", "SCR/CS"),
@@ -1539,6 +1583,7 @@ def test_structured_contract_uses_icb_823402_l1_bearer_adjacency_for_b_endpoint(
     ]
     transport_adjacency = [
         _transport_adjacency(service_id, bearer, "MEI/IX", "SNG/G"),
+        _transport_adjacency(service_id, mei_trunk, "MEI", "MEI/IX"),
     ]
     rows = [
         _row("MEI/IX", bearer, 1, ne_info="mei-b6", status_o_time="Planned"),
@@ -1578,6 +1623,8 @@ def test_structured_contract_uses_transport_endpoint_proof_for_ic_335493_bearer(
     ]
     transport_adjacency = [
         _transport_adjacency(service_id, bearer, "HY/I", "OSD2/I"),
+        _transport_adjacency(service_id, current_ol, "OSD", "OSD2/I"),
+        _transport_adjacency(service_id, migration_ol, "OSD2/I", "OSD2/Y"),
     ]
     rows = [
         _row("HY/I", bearer, 1, ne_info="HY/I XS DTN 01"),
