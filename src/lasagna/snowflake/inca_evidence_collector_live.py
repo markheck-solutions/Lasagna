@@ -3,19 +3,17 @@
 # ruff: noqa: F401,F403,F405,I001
 from __future__ import annotations
 
-from .inca_evidence_collector_context import *  # noqa: F403
-
 from typing import TYPE_CHECKING
 
+from .inca_evidence_collector_context import *  # noqa: F403
+
 if TYPE_CHECKING:
-    from .inca_evidence_collector_predicates import (
+    from .inca_evidence_collector_predicate_scan import scan_single_predicate
+    from .inca_evidence_collector_predicate_sql import (
+        add_nodes_from_fetched_rows,
         build_anchor_count_sql,
         execute_count,
         fetch_anchor_pages,
-        scan_single_predicate,
-    )
-    from .inca_evidence_collector_rows import (
-        add_nodes_from_fetched_rows,
         fanout_area_for_anchor,
         pages_to_fetch,
         seed_hit_row,

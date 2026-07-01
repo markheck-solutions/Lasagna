@@ -209,7 +209,9 @@ SELECT gb.SERVICE_ID,
        TRIM(COALESCE(nep.NEPART_SITE_CODE, ccp.SITE_CODE)) AS SITE_CODE,
        TRIM(COALESCE(nep.NEPART_SITE_TYPE, ccp.SITE_TYPE)) AS SITE_TYPE,
        ccp.SITE_TYPE_NO,
-       ccp.NE, ccp.NE_PART, ccp.FUNCTION AS OPTIC_FUNCTION,
+       ccp.NE, ccp.NE_PART, ccp.CONTENT AS DEVICE_CONTENT,
+       ccp.CONTENT_INT_ID AS DEVICE_CONTENT_INT_ID,
+       ccp.FUNCTION AS OPTIC_FUNCTION,
        ccp.LOCATION AS DEVICE_LOCATION,
        ccp.CONNECTION_POINT_NR, ccp.CONNPT_INT_ID,
        ccp.CONTENT_STATUS_FROM, ccp.CONTENT_FROM,
@@ -373,6 +375,8 @@ SELECT
     SITE_TYPE_NO,
     NE,
     NE_PART,
+    DEVICE_CONTENT,
+    DEVICE_CONTENT_INT_ID,
     OPTIC_FUNCTION,
     DEVICE_LOCATION,
     NEP_LOCATION,
@@ -415,6 +419,8 @@ SELECT 'DEVICE', OBJECT_CONSTRUCT(
     'SITE_TYPE_NO', SITE_TYPE_NO,
     'NE', NE,
     'NE_PART', NE_PART,
+    'DEVICE_CONTENT', DEVICE_CONTENT,
+    'DEVICE_CONTENT_INT_ID', DEVICE_CONTENT_INT_ID,
     'OPTIC_FUNCTION', OPTIC_FUNCTION,
     'DEVICE_LOCATION', DEVICE_LOCATION,
     'NEP_LOCATION', NEP_LOCATION,
@@ -510,14 +516,32 @@ WHERE COALESCE(cp.BFK_TRANSMISSION, cp.BFK_PCG) IS NOT NULL;
 -- Role: prod_edge_walk product edge traversal intermediate used to build path evidence.
 
 CREATE OR REPLACE TEMP TABLE prod_edge_walk AS
-WITH RECURSIVE edge_walk(level_no, level_tag, service_id, edge_name, edge_position, edge_position_id) AS (
+WITH RECURSIVE edge_walk(
+    level_no,
+    level_tag,
+    service_id,
+    parent_edge_name,
+    edge_name,
+    edge_position,
+    edge_position_id,
+    edge_position_path,
+    edge_position_sort_path,
+    path_text
+) AS (
     SELECT
         1 AS level_no,
         'L1' AS level_tag,
         SERVICE_ID,
+        BEARER_GE AS PARENT_EDGE_NAME,
         EDGE_NAME,
         EDGE_POSITION,
-        EDGE_POSITION_ID
+        EDGE_POSITION_ID,
+        COALESCE(EDGE_POSITION, 0)::VARCHAR || ':' || COALESCE(EDGE_POSITION_ID, 0)::VARCHAR
+            AS EDGE_POSITION_PATH,
+        LPAD(COALESCE(EDGE_POSITION, 0)::VARCHAR, 20, '0') || ':' ||
+            LPAD(COALESCE(EDGE_POSITION_ID, 0)::VARCHAR, 20, '0')
+            AS EDGE_POSITION_SORT_PATH,
+        EDGE_NAME AS PATH_TEXT
     FROM prod_edge_roots
 
     UNION ALL
@@ -526,6 +550,7 @@ WITH RECURSIVE edge_walk(level_no, level_tag, service_id, edge_name, edge_positi
         ew.level_no + 1 AS level_no,
         CONCAT('L', (ew.level_no + 1)::VARCHAR) AS level_tag,
         ew.SERVICE_ID,
+        ew.EDGE_NAME AS PARENT_EDGE_NAME,
         COALESCE(cp.BFK_TRANSMISSION, cp.BFK_PCG) AS EDGE_NAME,
         COALESCE(
             TRY_TO_NUMBER(cp.PCGPOSITION),
@@ -537,14 +562,53 @@ WITH RECURSIVE edge_walk(level_no, level_tag, service_id, edge_name, edge_positi
             cp.FK_TRANSPOSITION_INTID,
             cp.FK_CSPOSITION_INTID,
             cp.CHILD_INT_ID
-        ) AS EDGE_POSITION_ID
+        ) AS EDGE_POSITION_ID,
+        ew.EDGE_POSITION_PATH || '>' ||
+            COALESCE(
+                TRY_TO_NUMBER(cp.PCGPOSITION),
+                TRY_TO_NUMBER(cp.TRANSMISSIONPOSITION),
+                cp.CSPOSITION,
+                0
+            )::VARCHAR || ':' ||
+            COALESCE(
+                cp.FK_PCGPOSITION_INTID,
+                cp.FK_TRANSPOSITION_INTID,
+                cp.FK_CSPOSITION_INTID,
+                cp.CHILD_INT_ID,
+                0
+            )::VARCHAR AS EDGE_POSITION_PATH,
+        ew.EDGE_POSITION_SORT_PATH || '>' ||
+            LPAD(COALESCE(
+                TRY_TO_NUMBER(cp.PCGPOSITION),
+                TRY_TO_NUMBER(cp.TRANSMISSIONPOSITION),
+                cp.CSPOSITION,
+                0
+            )::VARCHAR, 20, '0') || ':' ||
+            LPAD(COALESCE(
+                cp.FK_PCGPOSITION_INTID,
+                cp.FK_TRANSPOSITION_INTID,
+                cp.FK_CSPOSITION_INTID,
+                cp.CHILD_INT_ID,
+                0
+            )::VARCHAR, 20, '0') AS EDGE_POSITION_SORT_PATH,
+        ew.PATH_TEXT || ' > ' || COALESCE(cp.BFK_TRANSMISSION, cp.BFK_PCG) AS PATH_TEXT
     FROM edge_walk ew
     JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_POSITION_CURRENT cp
         ON cp.CHILD_IDENTITY = ew.EDGE_NAME
-    WHERE ew.level_no < 5
+    WHERE ew.level_no < 8
       AND COALESCE(cp.BFK_TRANSMISSION, cp.BFK_PCG) IS NOT NULL
 )
-SELECT level_no, level_tag, service_id, edge_name, edge_position, edge_position_id
+SELECT
+    level_no,
+    level_tag,
+    service_id,
+    parent_edge_name,
+    edge_name,
+    edge_position,
+    edge_position_id,
+    edge_position_path,
+    edge_position_sort_path,
+    path_text
 FROM edge_walk;
 
 INSERT INTO prod_edges
@@ -568,40 +632,6 @@ FROM prod_edge_rows;
 -- Role: prod_all product inventory QID/ROW_DATA rows combined into the final export.
 
 ----------------------------------------------------------------------
--- TL_DEVICE: Map transport link names to device ports at each site.
--- Joins L1/L2 edge names to CCP where NE IS NOT NULL, resolving
--- which device (NE_PART) terminates each transport link at each site.
--- Used by inca_sorter.py to determine within-site building direction.
-----------------------------------------------------------------------
-INSERT INTO prod_all SELECT 'TL_DEVICE', OBJECT_CONSTRUCT(
-    'SERVICE_ID', SERVICE_ID,
-    'TL_NAME', TL_NAME,
-    'SITE_CODE', SITE_CODE,
-    'NE', NE,
-    'NE_PART', NE_PART,
-    'NEPART_SITE_CODE', NEPART_SITE_CODE,
-    'NEPART_SITE_TYPE', NEPART_SITE_TYPE
-) FROM (
-    SELECT DISTINCT
-        pe.SERVICE_ID,
-        pe.EDGE_NAME AS TL_NAME,
-        ccp.SITE_CODE,
-        ccp.NE,
-        ccp.NE_PART,
-        TRIM(nep.NEPART_SITE_CODE) AS NEPART_SITE_CODE,
-        nep.NEPART_SITE_TYPE
-    FROM prod_edges pe
-    JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_CONNECTION_POINT_CURRENT ccp
-        ON ccp.CONTENT = pe.EDGE_NAME
-        AND ccp.NE IS NOT NULL
-    LEFT JOIN prod_access_db.inca_src.V_T_INCATNT_NE_PART_CURRENT nep
-        ON ccp.NE = nep.NE
-        AND ccp.NE_PART = nep.NE_PART_NAME
-    WHERE pe.LEVEL_TAG IN ('L1', 'L2')
-);
--- Role: prod_all product inventory QID/ROW_DATA rows combined into the final export.
-
-----------------------------------------------------------------------
 -- DP_SDP: demarcation point ODF rows from dedicated DP view.
 -- Demarcation points are NOT in CCP — they have their own view
 -- (prod_access_db.inca_src.V_T_INCATNT_DEMARCATION_POINT_CURRENT) keyed by SERVICE_ID
@@ -617,7 +647,7 @@ FROM prod_access_db.inca_src.V_T_INCATNT_DEMARCATION_POINT_CURRENT dp;
 
 CREATE OR REPLACE TEMP TABLE prod_dp_sdp_rows AS
 SELECT
-    dp.CONTENT AS SERVICE_ID,
+    dp.SERVICE_ID_KEY AS SERVICE_ID,
     dp.SITE_CODE,
     dp.SITE_TYPE,
     dp.SITE_TYPE_NO,
@@ -639,6 +669,7 @@ SELECT
     CASE WHEN dp.SDP = 'X' THEN 'SDP_ODF' ELSE 'DP_ODF' END AS ROW_TYPE,
     dp.NWP_CUSTOMER,
     dp.NWP_ID,
+    dp.CONN_POINT_INT_ID,
     CASE WHEN dp.RACK IS NOT NULL THEN 'ARELION' ELSE 'EXTERNAL' END AS DP_OWNER
 FROM prod_dp_demarcation_points dp
 JOIN prod_services s ON dp.SERVICE_ID_KEY = s.SERVICE_ID
@@ -679,6 +710,7 @@ INSERT INTO prod_all SELECT 'DP_SDP', OBJECT_CONSTRUCT(
     'ROW_TYPE', ROW_TYPE,
     'NWP_CUSTOMER', NWP_CUSTOMER,
     'NWP_ID', NWP_ID,
+    'CONN_POINT_INT_ID', CONN_POINT_INT_ID,
     'DP_OWNER', DP_OWNER
 ) FROM prod_dp_sdp_rows;
 -- Role: prod_metadata_edge_names product metadata intermediate used to enrich final product rows.
@@ -699,8 +731,10 @@ SELECT DISTINCT
     p.BPK_PCG,
     p.A_SITE_CODE,
     p.A_SITE_TYPE,
+    p.A_SITE_TYPE_NUMBER,
     p.B_SITE_CODE,
     p.B_SITE_TYPE,
+    p.B_SITE_TYPE_NUMBER,
     p.MEDIA,
     p.PREFIX
 FROM prod_access_db.inca_src.V_T_INCATNT_PCG_CURRENT p
@@ -712,8 +746,10 @@ INSERT INTO prod_all SELECT 'TRUNK_METADATA', OBJECT_CONSTRUCT(
     'BPK_PCG', BPK_PCG,
     'A_SITE_CODE', A_SITE_CODE,
     'A_SITE_TYPE', A_SITE_TYPE,
+    'A_SITE_TYPE_NUMBER', A_SITE_TYPE_NUMBER,
     'B_SITE_CODE', B_SITE_CODE,
     'B_SITE_TYPE', B_SITE_TYPE,
+    'B_SITE_TYPE_NUMBER', B_SITE_TYPE_NUMBER,
     'MEDIA', MEDIA,
     'PREFIX', PREFIX
 )
@@ -732,8 +768,10 @@ SELECT DISTINCT
     t.OBJECTTYPE,
     t.A_SITE_CODE,
     t.A_SITE_TYPE,
+    t.A_SITE_TYPE_NUMBER,
     t.B_SITE_CODE,
     t.B_SITE_TYPE,
+    t.B_SITE_TYPE_NUMBER,
     t.PREFIX
 FROM prod_access_db.inca_src.V_T_INCATNT_TRANSMISSION_CURRENT t
 JOIN prod_metadata_edge_names edge_names
@@ -745,20 +783,440 @@ INSERT INTO prod_all SELECT 'TRANSMISSION_METADATA', OBJECT_CONSTRUCT(
     'OBJECTTYPE', OBJECTTYPE,
     'A_SITE_CODE', A_SITE_CODE,
     'A_SITE_TYPE', A_SITE_TYPE,
+    'A_SITE_TYPE_NUMBER', A_SITE_TYPE_NUMBER,
     'B_SITE_CODE', B_SITE_CODE,
     'B_SITE_TYPE', B_SITE_TYPE,
+    'B_SITE_TYPE_NUMBER', B_SITE_TYPE_NUMBER,
     'PREFIX', PREFIX
 )
 FROM prod_transmission_metadata_rows;
+
+-- Role: prod_transport_device_endpoint_rows product route-order proof intermediate.
+
+----------------------------------------------------------------------
+-- TRANSPORT_DEVICE_ADJACENCY: device-to-device transport proof.
+-- Uses recursive content-position edges plus CCP device endpoint rows.
+-- Emits an adjacency only when Snowflake provides exactly two distinct
+-- device endpoint sites for the same transport edge. This includes lower
+-- child edges (for example OTUC/WDM under an ODU) when parent transport
+-- edges do not carry endpoint CCP rows directly.
+----------------------------------------------------------------------
+CREATE OR REPLACE TEMP TABLE prod_transport_device_endpoint_rows AS
+SELECT
+    walk.service_id,
+    walk.edge_name,
+    walk.level_no,
+    walk.level_tag,
+    walk.parent_edge_name,
+    walk.edge_position,
+    walk.edge_position_id,
+    walk.edge_position_path,
+    walk.path_text,
+    ccp.CONNPT_INT_ID,
+    COALESCE(NULLIF(TRIM(nep.NEPART_SITE_CODE), ''), ccp.SITE_CODE) AS DEVICE_SITE_CODE,
+    COALESCE(NULLIF(TRIM(nep.NEPART_SITE_TYPE), ''), ccp.SITE_TYPE) AS DEVICE_SITE_TYPE,
+    ccp.NE,
+    ccp.NE_PART,
+    ccp.FUNCTION,
+    ccp.CONNECTION_POINT_NR,
+    ccp.SLOT,
+    ccp.SUBSLOT,
+    ccp.LOCATION
+FROM prod_edge_walk walk
+JOIN prod_transmission_metadata_rows tx
+    ON tx.BPK_TRANSMISSION = walk.edge_name
+JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_CONNECTION_POINT_CURRENT ccp
+    ON ccp.CONTENT = walk.edge_name
+    AND ccp.NE IS NOT NULL
+LEFT JOIN prod_access_db.inca_src.V_T_INCATNT_NE_PART_CURRENT nep
+    ON ccp.NE = nep.NE
+    AND ccp.NE_PART = nep.NE_PART_NAME
+WHERE COALESCE(NULLIF(TRIM(nep.NEPART_SITE_CODE), ''), ccp.SITE_CODE) IS NOT NULL;
+-- Role: prod_transport_device_adjacency_rows product route-order proof rows.
+
+CREATE OR REPLACE TEMP TABLE prod_transport_device_adjacency_rows AS
+WITH endpoint_sites AS (
+    SELECT DISTINCT
+        service_id,
+        edge_name,
+        level_no,
+        level_tag,
+        parent_edge_name,
+        edge_position,
+        edge_position_id,
+        edge_position_path,
+        path_text,
+        connpt_int_id,
+        device_site_code,
+        device_site_type,
+        ne,
+        ne_part,
+        function,
+        connection_point_nr,
+        slot,
+        subslot,
+        location
+    FROM prod_transport_device_endpoint_rows
+),
+device_row_keys AS (
+    SELECT DISTINCT
+        service_id,
+        site_code AS device_site_code,
+        site_type AS device_site_type,
+        ne,
+        ne_part,
+        optic_function,
+        device_location,
+        device_content,
+        device_content_int_id,
+        ne_type,
+        ne_function,
+        route_path AS device_route_path,
+        slot AS device_slot,
+        subslot AS device_subslot,
+        connection_point_nr AS device_connection_point_nr,
+        CASE
+            WHEN UPPER(COALESCE(ne_type, '')) IN ('WS', 'MOTR', 'OTN')
+              OR UPPER(COALESCE(ne_part, '')) LIKE '%WS%'
+                THEN 'CIENA_WS_MOTR_OTN'
+            WHEN UPPER(COALESCE(ne_type, '')) IN ('G30', 'G31', 'G40')
+              OR UPPER(COALESCE(ne_part, '')) LIKE 'G3%'
+              OR UPPER(COALESCE(ne_part, '')) LIKE 'G4%'
+                THEN 'G30_G40'
+            WHEN UPPER(COALESCE(ne_type, '')) = 'DTN'
+              OR UPPER(COALESCE(ne_part, '')) LIKE 'XTC%'
+                THEN 'DTN'
+            WHEN UPPER(COALESCE(ne_type, '')) IN ('TM', 'OTM32D', 'OTM40D', 'OTM96D', 'OADM')
+              OR UPPER(COALESCE(ne_type, '')) LIKE 'OTM%'
+                THEN 'OTM_TM'
+            ELSE COALESCE(NULLIF(ne_type, ''), 'UNKNOWN')
+        END AS device_platform_family
+    FROM prod_device_rows
+    WHERE ne IS NOT NULL
+      AND ne_part IS NOT NULL
+      AND slot IS NOT NULL
+      AND subslot IS NOT NULL
+),
+dwdm_cabling_endpoint_candidates AS (
+    SELECT DISTINCT
+        endpoint_sites.*,
+        endpoint_cacp.CABPT_INT_ID AS endpoint_cabpt_int_id,
+        peer_cacp.CABPT_INT_ID AS peer_cabpt_int_id,
+        device_row_keys.ne_type AS device_ne_type,
+        device_row_keys.ne_function AS device_ne_function,
+        device_row_keys.device_route_path,
+        device_row_keys.device_slot,
+        device_row_keys.device_subslot,
+        device_row_keys.device_connection_point_nr,
+        device_row_keys.device_platform_family AS platform_family,
+        'CABLING_POINT_TO_PEER_CABLING_POINT' AS port_match_rule,
+        'prod_transport_device_endpoint_rows + prod_device_rows + V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT + V_T_INCATNT_CABLING_CURRENT'
+            AS port_match_source_view,
+        OBJECT_CONSTRUCT(
+            'edge_position_id', endpoint_sites.edge_position_id,
+            'edge_position_path', endpoint_sites.edge_position_path,
+            'path_text', endpoint_sites.path_text,
+            'endpoint_connpt_int_id', endpoint_sites.connpt_int_id,
+            'endpoint_cabpt_int_id', endpoint_cacp.CABPT_INT_ID,
+            'peer_cabpt_int_id', peer_cacp.CABPT_INT_ID,
+            'device_route_path', device_row_keys.device_route_path,
+            'device_content', device_row_keys.device_content,
+            'device_content_int_id', device_row_keys.device_content_int_id
+        )::VARCHAR AS port_match_source_ids
+    FROM endpoint_sites
+    JOIN device_row_keys
+        ON device_row_keys.service_id = endpoint_sites.service_id
+        AND device_row_keys.device_site_code = endpoint_sites.device_site_code
+        AND device_row_keys.ne = endpoint_sites.ne
+        AND device_row_keys.ne_part = endpoint_sites.ne_part
+        AND device_row_keys.device_slot = endpoint_sites.slot
+    JOIN prod_access_db.inca_src.V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT endpoint_cacp
+        ON TO_VARCHAR(endpoint_cacp.CONNPT_INT_ID) = TO_VARCHAR(endpoint_sites.connpt_int_id)
+        AND endpoint_cacp.CABPT_INT_ID IS NOT NULL
+    JOIN prod_access_db.inca_src.V_T_INCATNT_CABLING_CURRENT cab
+        ON cab.A_CABPT_INT_ID = endpoint_cacp.CABPT_INT_ID
+        OR cab.B_CABPT_INT_ID = endpoint_cacp.CABPT_INT_ID
+    JOIN prod_access_db.inca_src.V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT peer_cacp
+        ON peer_cacp.CABPT_INT_ID IS NOT NULL
+        AND peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID
+        AND (
+            (
+                cab.A_CABPT_INT_ID = endpoint_cacp.CABPT_INT_ID
+                AND peer_cacp.CABPT_INT_ID = cab.B_CABPT_INT_ID
+            )
+            OR (
+                cab.B_CABPT_INT_ID = endpoint_cacp.CABPT_INT_ID
+                AND peer_cacp.CABPT_INT_ID = cab.A_CABPT_INT_ID
+            )
+        )
+    WHERE endpoint_sites.connpt_int_id IS NOT NULL
+      AND endpoint_sites.slot IS NOT NULL
+),
+candidate_endpoint_sites AS (
+    SELECT dwdm_cabling_endpoint_candidates.*, 'EXACT_DEVICE_PORT_MATCH' AS endpoint_proof_source, 1 AS proof_priority
+    FROM dwdm_cabling_endpoint_candidates
+),
+candidate_site_counts AS (
+    SELECT
+        service_id,
+        edge_name,
+        port_match_rule,
+        endpoint_proof_source,
+        COUNT(*) AS endpoint_row_count,
+        COUNT(DISTINCT device_site_code) AS endpoint_site_count,
+        COUNT(*) - COUNT(DISTINCT
+            device_site_code || '|' || ne || '|' || ne_part || '|' ||
+            device_slot || '|' || device_subslot || '|' ||
+            slot || '|' || connection_point_nr
+        ) AS duplicate_endpoint_count,
+        SUM(IFF(
+            device_site_code IS NULL
+            OR ne IS NULL
+            OR ne_part IS NULL
+            OR device_slot IS NULL
+            OR device_subslot IS NULL
+            OR slot IS NULL
+            OR connection_point_nr IS NULL
+            OR endpoint_cabpt_int_id IS NULL
+            OR peer_cabpt_int_id IS NULL,
+            1,
+            0
+        )) AS null_endpoint_count
+    FROM candidate_endpoint_sites
+    GROUP BY service_id, edge_name, port_match_rule, endpoint_proof_source
+),
+ranked_endpoints AS (
+    SELECT candidate_endpoint_sites.*,
+           candidate_site_counts.endpoint_row_count,
+           candidate_site_counts.duplicate_endpoint_count,
+           candidate_site_counts.null_endpoint_count,
+           ROW_NUMBER() OVER (
+                PARTITION BY
+                    candidate_endpoint_sites.service_id,
+                    candidate_endpoint_sites.edge_name,
+                    candidate_endpoint_sites.port_match_rule,
+                    candidate_endpoint_sites.endpoint_proof_source
+                ORDER BY
+                    candidate_endpoint_sites.device_site_code,
+                    candidate_endpoint_sites.ne,
+                    candidate_endpoint_sites.ne_part,
+                    candidate_endpoint_sites.device_slot,
+                    candidate_endpoint_sites.device_subslot,
+                    candidate_endpoint_sites.connection_point_nr
+            ) AS endpoint_rank
+    FROM candidate_endpoint_sites
+    JOIN candidate_site_counts
+        ON candidate_site_counts.service_id = candidate_endpoint_sites.service_id
+        AND candidate_site_counts.edge_name = candidate_endpoint_sites.edge_name
+        AND candidate_site_counts.port_match_rule = candidate_endpoint_sites.port_match_rule
+        AND candidate_site_counts.endpoint_proof_source = candidate_endpoint_sites.endpoint_proof_source
+        AND candidate_site_counts.endpoint_site_count IN (1, 2)
+        AND candidate_site_counts.endpoint_row_count = 2
+        AND candidate_site_counts.duplicate_endpoint_count = 0
+        AND candidate_site_counts.null_endpoint_count = 0
+),
+candidate_pairs AS (
+SELECT
+    first_endpoint.service_id,
+    first_endpoint.edge_name,
+    first_endpoint.level_no,
+    first_endpoint.level_tag,
+    first_endpoint.parent_edge_name,
+    first_endpoint.edge_position,
+    first_endpoint.edge_position_id,
+    first_endpoint.edge_position_path,
+    first_endpoint.path_text,
+    first_endpoint.port_match_rule,
+    first_endpoint.port_match_source_view,
+    first_endpoint.port_match_source_ids,
+    IFF(
+        first_endpoint.platform_family = second_endpoint.platform_family,
+        first_endpoint.platform_family,
+        'MIXED_PLATFORM'
+    ) AS PLATFORM_FAMILY,
+    first_endpoint.device_site_code AS ENDPOINT_1_SITE_CODE,
+    first_endpoint.device_site_type AS ENDPOINT_1_SITE_TYPE,
+    first_endpoint.ne AS ENDPOINT_1_NE,
+    first_endpoint.ne_part AS ENDPOINT_1_NE_PART,
+    first_endpoint.function AS ENDPOINT_1_FUNCTION,
+    first_endpoint.device_connection_point_nr AS ENDPOINT_1_DEVICE_CONNECTION_POINT_NR,
+    first_endpoint.device_slot AS ENDPOINT_1_DEVICE_SLOT,
+    first_endpoint.device_subslot AS ENDPOINT_1_DEVICE_SUBSLOT,
+    first_endpoint.connection_point_nr AS ENDPOINT_1_CCP_CONNECTION_POINT_NR,
+    first_endpoint.slot AS ENDPOINT_1_CCP_SLOT,
+    first_endpoint.subslot AS ENDPOINT_1_CCP_SUBSLOT,
+    first_endpoint.connection_point_nr AS ENDPOINT_1_CONNECTION_POINT_NR,
+    first_endpoint.slot AS ENDPOINT_1_SLOT,
+    first_endpoint.subslot AS ENDPOINT_1_SUBSLOT,
+    first_endpoint.location AS ENDPOINT_1_LOCATION,
+    second_endpoint.device_site_code AS ENDPOINT_2_SITE_CODE,
+    second_endpoint.device_site_type AS ENDPOINT_2_SITE_TYPE,
+    second_endpoint.ne AS ENDPOINT_2_NE,
+    second_endpoint.ne_part AS ENDPOINT_2_NE_PART,
+    second_endpoint.function AS ENDPOINT_2_FUNCTION,
+    second_endpoint.device_connection_point_nr AS ENDPOINT_2_DEVICE_CONNECTION_POINT_NR,
+    second_endpoint.device_slot AS ENDPOINT_2_DEVICE_SLOT,
+    second_endpoint.device_subslot AS ENDPOINT_2_DEVICE_SUBSLOT,
+    second_endpoint.connection_point_nr AS ENDPOINT_2_CCP_CONNECTION_POINT_NR,
+    second_endpoint.slot AS ENDPOINT_2_CCP_SLOT,
+    second_endpoint.subslot AS ENDPOINT_2_CCP_SUBSLOT,
+    second_endpoint.connection_point_nr AS ENDPOINT_2_CONNECTION_POINT_NR,
+    second_endpoint.slot AS ENDPOINT_2_SLOT,
+    second_endpoint.subslot AS ENDPOINT_2_SUBSLOT,
+    second_endpoint.location AS ENDPOINT_2_LOCATION,
+    first_endpoint.endpoint_proof_source,
+    first_endpoint.proof_priority,
+    first_endpoint.endpoint_row_count AS ENDPOINT_ROW_COUNT,
+    first_endpoint.duplicate_endpoint_count AS DUPLICATE_ENDPOINT_COUNT,
+    first_endpoint.null_endpoint_count AS NULL_ENDPOINT_COUNT,
+    0 AS AMBIGUITY_COUNT
+FROM ranked_endpoints first_endpoint
+JOIN ranked_endpoints second_endpoint
+    ON second_endpoint.service_id = first_endpoint.service_id
+    AND second_endpoint.edge_name = first_endpoint.edge_name
+    AND second_endpoint.port_match_rule = first_endpoint.port_match_rule
+    AND second_endpoint.endpoint_proof_source = first_endpoint.endpoint_proof_source
+    AND second_endpoint.endpoint_rank = 2
+    AND TO_VARCHAR(second_endpoint.endpoint_cabpt_int_id)
+        = TO_VARCHAR(first_endpoint.peer_cabpt_int_id)
+    AND TO_VARCHAR(first_endpoint.endpoint_cabpt_int_id)
+        = TO_VARCHAR(second_endpoint.peer_cabpt_int_id)
+WHERE first_endpoint.endpoint_rank = 1
+)
+SELECT
+    service_id,
+    edge_name,
+    level_no,
+    level_tag,
+    parent_edge_name,
+    edge_position,
+    edge_position_id,
+    edge_position_path,
+    path_text,
+    port_match_rule,
+    port_match_source_view,
+    port_match_source_ids,
+    platform_family,
+    endpoint_1_site_code,
+    endpoint_1_site_type,
+    endpoint_1_ne,
+    endpoint_1_ne_part,
+    endpoint_1_function,
+    endpoint_1_device_connection_point_nr,
+    endpoint_1_device_slot,
+    endpoint_1_device_subslot,
+    endpoint_1_ccp_connection_point_nr,
+    endpoint_1_ccp_slot,
+    endpoint_1_ccp_subslot,
+    endpoint_1_connection_point_nr,
+    endpoint_1_slot,
+    endpoint_1_subslot,
+    endpoint_1_location,
+    endpoint_2_site_code,
+    endpoint_2_site_type,
+    endpoint_2_ne,
+    endpoint_2_ne_part,
+    endpoint_2_function,
+    endpoint_2_device_connection_point_nr,
+    endpoint_2_device_slot,
+    endpoint_2_device_subslot,
+    endpoint_2_ccp_connection_point_nr,
+    endpoint_2_ccp_slot,
+    endpoint_2_ccp_subslot,
+    endpoint_2_connection_point_nr,
+    endpoint_2_slot,
+    endpoint_2_subslot,
+    endpoint_2_location,
+    endpoint_proof_source,
+    proof_priority,
+    endpoint_row_count,
+    duplicate_endpoint_count,
+    null_endpoint_count,
+    ambiguity_count
+FROM candidate_pairs
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY service_id, edge_name
+    ORDER BY proof_priority, endpoint_proof_source
+) = 1;
+-- Role: prod_all product inventory QID/ROW_DATA rows combined into the final export.
+
+INSERT INTO prod_all SELECT 'TRANSPORT_DEVICE_ADJACENCY', OBJECT_CONSTRUCT(
+    'SERVICE_ID', SERVICE_ID,
+    'EDGE_NAME', EDGE_NAME,
+    'LEVEL_NO', LEVEL_NO,
+    'LEVEL', LEVEL_TAG,
+    'PARENT_EDGE_NAME', PARENT_EDGE_NAME,
+    'EDGE_POSITION', EDGE_POSITION,
+    'EDGE_POSITION_ID', EDGE_POSITION_ID,
+    'EDGE_POSITION_PATH', EDGE_POSITION_PATH,
+    'PATH_TEXT', PATH_TEXT,
+    'PORT_MATCH_RULE', PORT_MATCH_RULE,
+    'PORT_MATCH_SOURCE_VIEW', PORT_MATCH_SOURCE_VIEW,
+    'PORT_MATCH_SOURCE_IDS', PORT_MATCH_SOURCE_IDS,
+    'PLATFORM_FAMILY', PLATFORM_FAMILY,
+    'ENDPOINT_1_SITE_CODE', ENDPOINT_1_SITE_CODE,
+    'ENDPOINT_1_SITE_TYPE', ENDPOINT_1_SITE_TYPE,
+    'ENDPOINT_1_NE', ENDPOINT_1_NE,
+    'ENDPOINT_1_NE_PART', ENDPOINT_1_NE_PART,
+    'ENDPOINT_1_FUNCTION', ENDPOINT_1_FUNCTION,
+    'ENDPOINT_1_DEVICE_CONNECTION_POINT_NR', ENDPOINT_1_DEVICE_CONNECTION_POINT_NR,
+    'ENDPOINT_1_DEVICE_SLOT', ENDPOINT_1_DEVICE_SLOT,
+    'ENDPOINT_1_DEVICE_SUBSLOT', ENDPOINT_1_DEVICE_SUBSLOT,
+    'ENDPOINT_1_CCP_CONNECTION_POINT_NR', ENDPOINT_1_CCP_CONNECTION_POINT_NR,
+    'ENDPOINT_1_CCP_SLOT', ENDPOINT_1_CCP_SLOT,
+    'ENDPOINT_1_CCP_SUBSLOT', ENDPOINT_1_CCP_SUBSLOT,
+    'ENDPOINT_1_CONNECTION_POINT_NR', ENDPOINT_1_CONNECTION_POINT_NR,
+    'ENDPOINT_1_SLOT', ENDPOINT_1_SLOT,
+    'ENDPOINT_1_SUBSLOT', ENDPOINT_1_SUBSLOT,
+    'ENDPOINT_1_LOCATION', ENDPOINT_1_LOCATION,
+    'ENDPOINT_2_SITE_CODE', ENDPOINT_2_SITE_CODE,
+    'ENDPOINT_2_SITE_TYPE', ENDPOINT_2_SITE_TYPE,
+    'ENDPOINT_2_NE', ENDPOINT_2_NE,
+    'ENDPOINT_2_NE_PART', ENDPOINT_2_NE_PART,
+    'ENDPOINT_2_FUNCTION', ENDPOINT_2_FUNCTION,
+    'ENDPOINT_2_DEVICE_CONNECTION_POINT_NR', ENDPOINT_2_DEVICE_CONNECTION_POINT_NR,
+    'ENDPOINT_2_DEVICE_SLOT', ENDPOINT_2_DEVICE_SLOT,
+    'ENDPOINT_2_DEVICE_SUBSLOT', ENDPOINT_2_DEVICE_SUBSLOT,
+    'ENDPOINT_2_CCP_CONNECTION_POINT_NR', ENDPOINT_2_CCP_CONNECTION_POINT_NR,
+    'ENDPOINT_2_CCP_SLOT', ENDPOINT_2_CCP_SLOT,
+    'ENDPOINT_2_CCP_SUBSLOT', ENDPOINT_2_CCP_SUBSLOT,
+    'ENDPOINT_2_CONNECTION_POINT_NR', ENDPOINT_2_CONNECTION_POINT_NR,
+    'ENDPOINT_2_SLOT', ENDPOINT_2_SLOT,
+    'ENDPOINT_2_SUBSLOT', ENDPOINT_2_SUBSLOT,
+    'ENDPOINT_2_LOCATION', ENDPOINT_2_LOCATION,
+    'ENDPOINT_PROOF_SOURCE', ENDPOINT_PROOF_SOURCE,
+    'ENDPOINT_ROW_COUNT', ENDPOINT_ROW_COUNT,
+    'DUPLICATE_ENDPOINT_COUNT', DUPLICATE_ENDPOINT_COUNT,
+    'NULL_ENDPOINT_COUNT', NULL_ENDPOINT_COUNT,
+    'AMBIGUITY_COUNT', AMBIGUITY_COUNT
+)
+FROM prod_transport_device_adjacency_rows;
 -- Role: prod_site_metadata_source_codes product metadata intermediate used to enrich final product rows.
 
 ----------------------------------------------------------------------
 -- SITE_METADATA: Site metadata for all site types in this export
 ----------------------------------------------------------------------
 CREATE OR REPLACE TEMP TABLE prod_site_metadata_source_codes AS
-SELECT DISTINCT row_data:SITE_CODE::VARCHAR AS SITE_CODE
+SELECT DISTINCT
+    row_data:SITE_CODE::VARCHAR AS SITE_CODE,
+    row_data:SITE_TYPE::VARCHAR AS SITE_TYPE,
+    row_data:SITE_TYPE_NO::VARCHAR AS SITE_TYPE_NO
 FROM prod_all
-WHERE row_data:SITE_CODE IS NOT NULL;
+WHERE row_data:SITE_CODE IS NOT NULL
+UNION
+SELECT DISTINCT
+    row_data:A_SITE_CODE::VARCHAR AS SITE_CODE,
+    row_data:A_SITE_TYPE::VARCHAR AS SITE_TYPE,
+    row_data:A_SITE_TYPE_NUMBER::VARCHAR AS SITE_TYPE_NO
+FROM prod_all
+WHERE row_data:A_SITE_CODE IS NOT NULL
+UNION
+SELECT DISTINCT
+    row_data:B_SITE_CODE::VARCHAR AS SITE_CODE,
+    row_data:B_SITE_TYPE::VARCHAR AS SITE_TYPE,
+    row_data:B_SITE_TYPE_NUMBER::VARCHAR AS SITE_TYPE_NO
+FROM prod_all
+WHERE row_data:B_SITE_CODE IS NOT NULL;
 -- Role: prod_site_metadata_rows product metadata intermediate used to enrich final product rows.
 
 CREATE OR REPLACE TEMP TABLE prod_site_metadata_rows AS
@@ -781,7 +1239,9 @@ SELECT DISTINCT
     s.GEO_LONGITUDE
 FROM prod_access_db.inca_src.V_T_INCATNT_SITE_CURRENT s
 JOIN prod_site_metadata_source_codes source_codes
-    ON s.SITE_CODE = source_codes.SITE_CODE;
+    ON s.SITE_CODE = source_codes.SITE_CODE
+    AND (source_codes.SITE_TYPE IS NULL OR s.SITE_TYPE = source_codes.SITE_TYPE)
+    AND (source_codes.SITE_TYPE_NO IS NULL OR NVL(s.SITE_TYPE_NO, '') = NVL(source_codes.SITE_TYPE_NO, ''));
 -- Role: prod_all product inventory QID/ROW_DATA rows combined into the final export.
 
 INSERT INTO prod_all SELECT 'SITE_METADATA', OBJECT_CONSTRUCT(
@@ -806,9 +1266,9 @@ FROM prod_site_metadata_rows;
 -- Role: prod_site_location_rows product route-order metadata intermediate.
 
 CREATE OR REPLACE TEMP TABLE prod_site_location_rows AS
-SELECT SITE_CODE, MAX(SITE_LOCATION_ID) AS SITE_LOCATION_ID
+SELECT SITE_CODE, SITE_TYPE, SITE_TYPE_NO, MAX(SITE_LOCATION_ID) AS SITE_LOCATION_ID
 FROM prod_site_metadata_rows
-GROUP BY SITE_CODE;
+GROUP BY SITE_CODE, SITE_TYPE, SITE_TYPE_NO;
 -- Role: prod_route_order_relevant_edges product route-order metadata intermediate.
 
 CREATE OR REPLACE TEMP TABLE prod_route_order_relevant_edges AS
@@ -816,7 +1276,7 @@ SELECT DISTINCT
     row_data:SERVICE_ID::VARCHAR AS SERVICE_ID,
     row_data:ROUTE_PATH::VARCHAR AS ROUTE_PATH
 FROM prod_all
-WHERE qid IN ('TRUNK_ODF', 'DEVICE', 'DP_SDP')
+WHERE qid IN ('TRUNK_ODF', 'DEVICE')
   AND row_data:SERVICE_ID IS NOT NULL
   AND row_data:ROUTE_PATH IS NOT NULL;
 -- Role: prod_route_order_position_rows product route-order metadata intermediate.
@@ -830,14 +1290,13 @@ CREATE OR REPLACE TEMP TABLE prod_route_order_position_rows AS
 SELECT
     walk.service_id,
     walk.edge_name,
-    MIN(walk.edge_position) AS edge_position,
-    MIN(walk.edge_position_id) AS edge_position_id
+    MIN(walk.edge_position_path) AS edge_position_path,
+    MIN(walk.edge_position_sort_path) AS edge_position_sort_path
 FROM prod_edge_walk walk
 JOIN prod_route_order_relevant_edges relevant_edges
     ON relevant_edges.SERVICE_ID = walk.service_id
     AND relevant_edges.ROUTE_PATH = walk.edge_name
-WHERE walk.level_no > 1
-  AND walk.edge_name IS NOT NULL
+WHERE walk.edge_name IS NOT NULL
   AND walk.edge_position IS NOT NULL
 GROUP BY walk.service_id, walk.edge_name;
 -- Role: prod_route_order_site_sides product route-order side metadata intermediate.
@@ -863,7 +1322,11 @@ SELECT DISTINCT
     ranked.edge_sequence AS EDGE_SEQUENCE,
     ranked.edge_name AS EDGE_NAME,
     COALESCE(pcg.A_SITE_CODE, tx.A_SITE_CODE) AS A_SITE_CODE,
+    COALESCE(pcg.A_SITE_TYPE, tx.A_SITE_TYPE) AS A_SITE_TYPE,
+    COALESCE(pcg.A_SITE_TYPE_NUMBER, tx.A_SITE_TYPE_NUMBER) AS A_SITE_TYPE_NO,
     COALESCE(pcg.B_SITE_CODE, tx.B_SITE_CODE) AS B_SITE_CODE,
+    COALESCE(pcg.B_SITE_TYPE, tx.B_SITE_TYPE) AS B_SITE_TYPE,
+    COALESCE(pcg.B_SITE_TYPE_NUMBER, tx.B_SITE_TYPE_NUMBER) AS B_SITE_TYPE_NO,
     a_site.SITE_LOCATION_ID AS A_SITE_LOCATION_ID,
     b_site.SITE_LOCATION_ID AS B_SITE_LOCATION_ID,
     a_side.site_side AS A_SITE_SIDE,
@@ -875,7 +1338,7 @@ FROM (
         edge_name,
         DENSE_RANK() OVER (
             PARTITION BY service_id
-            ORDER BY edge_position, edge_position_id
+            ORDER BY edge_position_sort_path, edge_position_path, edge_name
         ) AS edge_sequence
     FROM prod_route_order_position_rows
 ) ranked
@@ -885,8 +1348,12 @@ LEFT JOIN prod_transmission_metadata_rows tx
     ON tx.BPK_TRANSMISSION = ranked.edge_name
 LEFT JOIN prod_site_location_rows a_site
     ON a_site.SITE_CODE = COALESCE(pcg.A_SITE_CODE, tx.A_SITE_CODE)
+    AND a_site.SITE_TYPE = COALESCE(pcg.A_SITE_TYPE, tx.A_SITE_TYPE)
+    AND NVL(a_site.SITE_TYPE_NO, '') = NVL(COALESCE(pcg.A_SITE_TYPE_NUMBER, tx.A_SITE_TYPE_NUMBER), '')
 LEFT JOIN prod_site_location_rows b_site
     ON b_site.SITE_CODE = COALESCE(pcg.B_SITE_CODE, tx.B_SITE_CODE)
+    AND b_site.SITE_TYPE = COALESCE(pcg.B_SITE_TYPE, tx.B_SITE_TYPE)
+    AND NVL(b_site.SITE_TYPE_NO, '') = NVL(COALESCE(pcg.B_SITE_TYPE_NUMBER, tx.B_SITE_TYPE_NUMBER), '')
 LEFT JOIN prod_route_order_site_sides a_side
     ON a_side.service_id = ranked.service_id
     AND a_side.route_path = ranked.edge_name
@@ -907,7 +1374,11 @@ INSERT INTO prod_all SELECT 'ROUTE_ORDER_METADATA', OBJECT_CONSTRUCT(
     'EDGE_SEQUENCE', EDGE_SEQUENCE,
     'EDGE_NAME', EDGE_NAME,
     'A_SITE_CODE', A_SITE_CODE,
+    'A_SITE_TYPE', A_SITE_TYPE,
+    'A_SITE_TYPE_NO', A_SITE_TYPE_NO,
     'B_SITE_CODE', B_SITE_CODE,
+    'B_SITE_TYPE', B_SITE_TYPE,
+    'B_SITE_TYPE_NO', B_SITE_TYPE_NO,
     'A_SITE_LOCATION_ID', A_SITE_LOCATION_ID,
     'B_SITE_LOCATION_ID', B_SITE_LOCATION_ID,
     'A_SITE_SIDE', A_SITE_SIDE,
@@ -916,6 +1387,184 @@ INSERT INTO prod_all SELECT 'ROUTE_ORDER_METADATA', OBJECT_CONSTRUCT(
 )
 FROM prod_route_order_metadata_rows
 ORDER BY SERVICE_ID, EDGE_SEQUENCE;
+-- Role: prod_dp_endpoint_role_candidates product demarcation endpoint role proof intermediate.
+
+----------------------------------------------------------------------
+-- DP_ENDPOINT_ROLE: demarcation endpoint role proof.
+-- Emits only when a DP/SDP row maps to exactly one structured route
+-- endpoint at the strongest available proof level. No route-name parsing.
+----------------------------------------------------------------------
+CREATE OR REPLACE TEMP TABLE prod_dp_endpoint_role_candidates AS
+SELECT
+    dp.SERVICE_ID,
+    dp.ROUTE_PATH AS DP_ROUTE_PATH,
+    dp.SITE_CODE,
+    dp.SITE_TYPE,
+    dp.SITE_TYPE_NO,
+    dp.POS,
+    dp.CABLING_POINTS,
+    dp.CONN_TYPE,
+    dp.NE_INFORMATION,
+    dp.DP_OWNER,
+    dp.CONN_POINT_INT_ID,
+    rom.ROUTE_PATH AS MATCHED_ROUTE_PATH,
+    rom.EDGE_SEQUENCE AS MATCHED_EDGE_SEQUENCE,
+    'A' AS MATCHED_SITE_SIDE,
+    'DP_EXACT_SITE_IDENTITY' AS ENDPOINT_PROOF_SOURCE,
+    1 AS PROOF_PRIORITY
+FROM prod_dp_sdp_rows dp
+JOIN prod_route_order_metadata_rows rom
+    ON rom.SERVICE_ID = dp.SERVICE_ID
+    AND dp.SITE_CODE = rom.A_SITE_CODE
+    AND dp.SITE_TYPE = rom.A_SITE_TYPE
+    AND NVL(dp.SITE_TYPE_NO, '') = NVL(rom.A_SITE_TYPE_NO, '')
+
+UNION ALL
+
+SELECT
+    dp.SERVICE_ID,
+    dp.ROUTE_PATH AS DP_ROUTE_PATH,
+    dp.SITE_CODE,
+    dp.SITE_TYPE,
+    dp.SITE_TYPE_NO,
+    dp.POS,
+    dp.CABLING_POINTS,
+    dp.CONN_TYPE,
+    dp.NE_INFORMATION,
+    dp.DP_OWNER,
+    dp.CONN_POINT_INT_ID,
+    rom.ROUTE_PATH AS MATCHED_ROUTE_PATH,
+    rom.EDGE_SEQUENCE AS MATCHED_EDGE_SEQUENCE,
+    'B' AS MATCHED_SITE_SIDE,
+    'DP_EXACT_SITE_IDENTITY' AS ENDPOINT_PROOF_SOURCE,
+    1 AS PROOF_PRIORITY
+FROM prod_dp_sdp_rows dp
+JOIN prod_route_order_metadata_rows rom
+    ON rom.SERVICE_ID = dp.SERVICE_ID
+    AND dp.SITE_CODE = rom.B_SITE_CODE
+    AND dp.SITE_TYPE = rom.B_SITE_TYPE
+    AND NVL(dp.SITE_TYPE_NO, '') = NVL(rom.B_SITE_TYPE_NO, '')
+
+UNION ALL
+
+SELECT
+    dp.SERVICE_ID,
+    dp.ROUTE_PATH AS DP_ROUTE_PATH,
+    dp.SITE_CODE,
+    dp.SITE_TYPE,
+    dp.SITE_TYPE_NO,
+    dp.POS,
+    dp.CABLING_POINTS,
+    dp.CONN_TYPE,
+    dp.NE_INFORMATION,
+    dp.DP_OWNER,
+    dp.CONN_POINT_INT_ID,
+    rom.ROUTE_PATH AS MATCHED_ROUTE_PATH,
+    rom.EDGE_SEQUENCE AS MATCHED_EDGE_SEQUENCE,
+    'A' AS MATCHED_SITE_SIDE,
+    'DP_SITE_CODE_TRANSPORT_ENDPOINT' AS ENDPOINT_PROOF_SOURCE,
+    2 AS PROOF_PRIORITY
+FROM prod_dp_sdp_rows dp
+JOIN prod_route_order_metadata_rows rom
+    ON rom.SERVICE_ID = dp.SERVICE_ID
+    AND dp.SITE_CODE = rom.A_SITE_CODE
+JOIN prod_transport_device_adjacency_rows transport_role
+    ON transport_role.service_id = rom.SERVICE_ID
+    AND transport_role.edge_name = rom.ROUTE_PATH
+    AND (
+        transport_role.ENDPOINT_1_SITE_CODE = dp.SITE_CODE
+        OR transport_role.ENDPOINT_2_SITE_CODE = dp.SITE_CODE
+    )
+WHERE dp.DP_OWNER = 'ARELION'
+  AND dp.CONN_POINT_INT_ID IS NOT NULL
+
+UNION ALL
+
+SELECT
+    dp.SERVICE_ID,
+    dp.ROUTE_PATH AS DP_ROUTE_PATH,
+    dp.SITE_CODE,
+    dp.SITE_TYPE,
+    dp.SITE_TYPE_NO,
+    dp.POS,
+    dp.CABLING_POINTS,
+    dp.CONN_TYPE,
+    dp.NE_INFORMATION,
+    dp.DP_OWNER,
+    dp.CONN_POINT_INT_ID,
+    rom.ROUTE_PATH AS MATCHED_ROUTE_PATH,
+    rom.EDGE_SEQUENCE AS MATCHED_EDGE_SEQUENCE,
+    'B' AS MATCHED_SITE_SIDE,
+    'DP_SITE_CODE_TRANSPORT_ENDPOINT' AS ENDPOINT_PROOF_SOURCE,
+    2 AS PROOF_PRIORITY
+FROM prod_dp_sdp_rows dp
+JOIN prod_route_order_metadata_rows rom
+    ON rom.SERVICE_ID = dp.SERVICE_ID
+    AND dp.SITE_CODE = rom.B_SITE_CODE
+JOIN prod_transport_device_adjacency_rows transport_role
+    ON transport_role.service_id = rom.SERVICE_ID
+    AND transport_role.edge_name = rom.ROUTE_PATH
+    AND (
+        transport_role.ENDPOINT_1_SITE_CODE = dp.SITE_CODE
+        OR transport_role.ENDPOINT_2_SITE_CODE = dp.SITE_CODE
+    )
+WHERE dp.DP_OWNER = 'ARELION'
+  AND dp.CONN_POINT_INT_ID IS NOT NULL;
+-- Role: prod_dp_endpoint_role_rows product demarcation endpoint role proof rows.
+
+CREATE OR REPLACE TEMP TABLE prod_dp_endpoint_role_rows AS
+WITH ranked_candidates AS (
+    SELECT
+        candidates.*,
+        MIN(PROOF_PRIORITY) OVER (
+            PARTITION BY SERVICE_ID, DP_ROUTE_PATH, SITE_CODE, SITE_TYPE, NVL(SITE_TYPE_NO, ''),
+                POS, CABLING_POINTS, CONN_TYPE
+        ) AS MIN_PROOF_PRIORITY,
+        COUNT(*) OVER (
+            PARTITION BY SERVICE_ID, DP_ROUTE_PATH, SITE_CODE, SITE_TYPE, NVL(SITE_TYPE_NO, ''),
+                POS, CABLING_POINTS, CONN_TYPE, PROOF_PRIORITY
+        ) AS SAME_PRIORITY_CANDIDATE_COUNT
+    FROM prod_dp_endpoint_role_candidates candidates
+)
+SELECT
+    SERVICE_ID,
+    DP_ROUTE_PATH,
+    SITE_CODE,
+    SITE_TYPE,
+    SITE_TYPE_NO,
+    POS,
+    CABLING_POINTS,
+    CONN_TYPE,
+    NE_INFORMATION,
+    DP_OWNER,
+    CONN_POINT_INT_ID,
+    MATCHED_ROUTE_PATH,
+    MATCHED_EDGE_SEQUENCE,
+    MATCHED_SITE_SIDE,
+    ENDPOINT_PROOF_SOURCE
+FROM ranked_candidates
+WHERE PROOF_PRIORITY = MIN_PROOF_PRIORITY
+  AND SAME_PRIORITY_CANDIDATE_COUNT = 1;
+-- Role: prod_all product inventory QID/ROW_DATA rows combined into the final export.
+
+INSERT INTO prod_all SELECT 'DP_ENDPOINT_ROLE', OBJECT_CONSTRUCT(
+    'SERVICE_ID', SERVICE_ID,
+    'DP_ROUTE_PATH', DP_ROUTE_PATH,
+    'SITE_CODE', SITE_CODE,
+    'SITE_TYPE', SITE_TYPE,
+    'SITE_TYPE_NO', SITE_TYPE_NO,
+    'POS', POS,
+    'CABLING_POINTS', CABLING_POINTS,
+    'CONN_TYPE', CONN_TYPE,
+    'NE_INFORMATION', NE_INFORMATION,
+    'DP_OWNER', DP_OWNER,
+    'CONN_POINT_INT_ID', CONN_POINT_INT_ID,
+    'MATCHED_ROUTE_PATH', MATCHED_ROUTE_PATH,
+    'MATCHED_EDGE_SEQUENCE', MATCHED_EDGE_SEQUENCE,
+    'MATCHED_SITE_SIDE', MATCHED_SITE_SIDE,
+    'ENDPOINT_PROOF_SOURCE', ENDPOINT_PROOF_SOURCE
+)
+FROM prod_dp_endpoint_role_rows;
 -- Role: prod_bo_fiber_device_names back-office fiber intermediate used to enrich final product rows.
 
 ----------------------------------------------------------------------

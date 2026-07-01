@@ -11,6 +11,14 @@ from typing import Any
 
 import pytest
 
+from lasagna.evidence_snapshots import (
+    OWNER_APPROVAL_REQUIRED,
+    SnapshotLimits,
+    decision_matrix_payload,
+    predicate_probe_snapshot_payload,
+    probe_decision,
+    sanitize_sample_rows,
+)
 from lasagna.snowflake.inca_src_discovery import (
     APPROVED_SEMANTICS,
     FAIL,
@@ -143,6 +151,11 @@ def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) ->
         phase=phase,
         seed_mode="service-anchor",
         route_seed_id_bag=None,
+        probe_sample_row_limit=5,
+        semantic_site_code="ASH/R1",
+        semantic_device_token="DTN",
+        semantic_fetch_row_limit=125,
+        semantic_service_ids=("IC-388612",),
         internal_deadline_seconds=deadline,
         statement_timeout_seconds=120,
         run_dir=tmp_path / "run-test",
@@ -151,10 +164,6 @@ def collector_args(tmp_path: Path, phase: str = "full", deadline: int = 1500) ->
         resume=False,
         start_fresh=False,
     )
-
-
-def expire_internal_deadline(state: Any) -> None:
-    state.deadline_started_monotonic = time.monotonic() - state.config.internal_deadline_seconds - 1
 
 
 class FailingTablesCursor(FakeCursor):
@@ -179,16 +188,227 @@ class ExactScanCursor(FakeCursor):
             super().execute(sql, params)
 
 
+class HighFanoutProbeCursor(FakeCursor):
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append(sql)
+        self.sfqid = f"Q{len(self.calls)}"
+        upper = sql.upper()
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(2501,)]
+            return
+        if "ROW_HASH" in upper:
+            raise AssertionError("high-fanout probe must not sample rows")
+        super().execute(sql, params)
+
+
+class DtnSemanticProbeCursor(FakeCursor):
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> None:
+        self.calls.append(sql)
+        self.sfqid = f"Q{len(self.calls)}"
+        upper = sql.upper()
+        handlers = (
+            ("V_T_INCATNT_SERVICE_TRANSMISSION_CURRENT", self._service_rows),
+            ("V_T_INCATNT_CONTENT_POSITION_CURRENT", self._content_position_rows),
+            ("V_T_INCATNT_CONTENT_CONNECTION_POINT_CURRENT", self._ccp_rows),
+            ("V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT", self._cacp_rows),
+            ("V_T_INCATNT_CABLING_CURRENT", self._cabling_rows),
+        )
+        for table_name, handler in handlers:
+            if table_name in upper:
+                handler(upper, params)
+                return
+        super().execute(sql, params)
+
+    def _service_rows(self, _upper: str, _params: tuple[object, ...]) -> None:
+        self.description = [("SERVICE_ID",), ("TRANSMISSION_INTID",)]
+        self._rows = [("IC-388612", "19395139")]
+
+    def _content_position_rows(self, upper: str, params: tuple[object, ...]) -> None:
+        first_param = str(params[0]) if params else ""
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(1 if first_param == "19395139" else 0,)]
+            return
+        self.description = [("CHILD_IDENTITY",), ("CONTENT",)]
+        self._rows = [("19395139", "BEARER-G-1")]
+
+    def _ccp_rows(self, upper: str, params: tuple[object, ...]) -> None:
+        first_param = str(params[0]) if params else ""
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(16 if first_param == "BEARER-G-1" else 0,)]
+            return
+        self.description = [
+            ("CCP__CONTENT",),
+            ("CCP__CONNPT_INT_ID",),
+            ("CCP__NE",),
+            ("CCP__NE_PART",),
+            ("CCP__SITE_CODE",),
+            ("NEP__NEPART_SITE_CODE",),
+            ("NEP__NE_TYPE",),
+        ]
+        self._rows = [("BEARER-G-1", "10948573", "DTN-ASHR1-01", "SHELF-1", "", "ASH/R1", "DTN")]
+
+    def _cacp_rows(self, upper: str, _params: tuple[object, ...]) -> None:
+        by_connpt = 'TO_VARCHAR("CONNPT_INT_ID") IN' in upper
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(3 if by_connpt else 4,)]
+            return
+        self.description = [("CONNPT_INT_ID",), ("CABPT_INT_ID",)]
+        self._rows = (
+            [("10948573", "10948574"), ("10948573", "10948575"), ("10948573", "10948575")]
+            if by_connpt
+            else [
+                ("10948573", "10948574"),
+                ("10948573", "10948575"),
+                ("20000001", "20010001"),
+                ("20000002", "20010002"),
+            ]
+        )
+
+    def _cabling_rows(self, upper: str, _params: tuple[object, ...]) -> None:
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(2,)]
+            return
+        self.description = [("A_CABPT_INT_ID",), ("B_CABPT_INT_ID",)]
+        self._rows = [("10948574", "20010001"), ("10948575", "20010002")]
+
+
+class DwdmMultiServiceProbeCursor(DtnSemanticProbeCursor):
+    fanout_service = "IC-339967"
+
+    def _service_rows(self, _upper: str, params: tuple[object, ...]) -> None:
+        service_id = str(params[0])
+        self.description = [("SERVICE_ID",), ("TRANSMISSION_INTID",)]
+        self._rows = [(service_id, f"TX-{service_id}")]
+
+    def _content_position_rows(self, upper: str, params: tuple[object, ...]) -> None:
+        seed = str(params[0]) if params else ""
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(1 if seed.startswith("TX-") else 0,)]
+            return
+        service_id = seed.removeprefix("TX-")
+        self.description = [("CHILD_IDENTITY",), ("CONTENT",)]
+        self._rows = [(seed, f"BEARER-{service_id}")]
+
+    def _ccp_rows(self, upper: str, params: tuple[object, ...]) -> None:
+        content = str(params[0]) if params else ""
+        if not content.startswith("BEARER-"):
+            self.description = [("MATCH_COUNT",)] if "COUNT(*) AS MATCH_COUNT" in upper else []
+            self._rows = [(0,)] if "COUNT(*) AS MATCH_COUNT" in upper else []
+            return
+        service_id = content.removeprefix("BEARER-")
+        fanout = service_id == self.fanout_service
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(81 if fanout else 2,)]
+            return
+        self.description = [
+            ("CCP__CONTENT",),
+            ("CCP__CONNPT_INT_ID",),
+            ("CCP__NE",),
+            ("CCP__NE_PART",),
+            ("CCP__SITE_CODE",),
+            ("NEP__NEPART_SITE_CODE",),
+            ("NEP__NE_TYPE",),
+        ]
+        if fanout:
+            self._rows = [
+                (
+                    content,
+                    f"FAN-{index:03d}",
+                    f"DTN-{index:03d}",
+                    "XTC-01",
+                    "",
+                    "PHOX/2" if index % 2 else "EPW",
+                    "DTN",
+                )
+                for index in range(81)
+            ]
+            return
+        self._rows = [
+            (content, f"CONN-{service_id}-A", f"DTN-{service_id}-A", "XTC-01", "", "AAA", "DTN"),
+            (content, f"CONN-{service_id}-B", f"DTN-{service_id}-B", "XTC-02", "", "BBB", "DTN"),
+        ]
+
+    def _cacp_rows(self, upper: str, params: tuple[object, ...]) -> None:
+        by_connpt = 'TO_VARCHAR("CONNPT_INT_ID") IN' in upper
+        fanout = any(str(value).startswith("FAN-") for value in params)
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            if by_connpt:
+                self._rows = [(81 if fanout else 2,)]
+            else:
+                self._rows = [(4,)]
+            return
+        self.description = [("CONNPT_INT_ID",), ("CABPT_INT_ID",)]
+        if by_connpt and fanout:
+            self._rows = [(str(value), "") for value in params if str(value).startswith("FAN-")]
+        elif by_connpt:
+            connpt_values = [str(value) for value in params if str(value).startswith("CONN-")]
+            self._rows = [
+                (str(value), f"CAB-{index}") for index, value in enumerate(connpt_values, 1)
+            ]
+        else:
+            self._rows = [
+                ("CONN-A", "CAB-1"),
+                ("CONN-B", "CAB-2"),
+                ("PEER-A", "PEER-1"),
+                ("PEER-B", "PEER-2"),
+            ]
+
+    def _cabling_rows(self, upper: str, _params: tuple[object, ...]) -> None:
+        if "COUNT(*) AS MATCH_COUNT" in upper:
+            self.description = [("MATCH_COUNT",)]
+            self._rows = [(2,)]
+            return
+        self.description = [("A_CABPT_INT_ID",), ("B_CABPT_INT_ID",)]
+        self._rows = [("CAB-1", "PEER-1"), ("CAB-2", "PEER-2")]
+
+
+def semantic_probe_profiles() -> list[collector.ColumnProfile]:
+    objects = collector.DTN_SEMANTIC_OBJECTS
+    return [
+        semantic_column(objects["service"], "SERVICE_ID"),
+        semantic_column(objects["service"], "TRANSMISSION_INTID"),
+        semantic_column(objects["content_position"], "CHILD_IDENTITY"),
+        semantic_column(objects["content_position"], "CONTENT"),
+        semantic_column(objects["content_connection_point"], "CONTENT"),
+        semantic_column(objects["content_connection_point"], "CONNPT_INT_ID"),
+        semantic_column(objects["content_connection_point"], "NE"),
+        semantic_column(objects["content_connection_point"], "NE_PART"),
+        semantic_column(objects["content_connection_point"], "SITE_CODE"),
+        semantic_column(objects["connection_cabling_point"], "CONNPT_INT_ID"),
+        semantic_column(objects["connection_cabling_point"], "CABPT_INT_ID"),
+        semantic_column(objects["cabling"], "A_CABPT_INT_ID"),
+        semantic_column(objects["cabling"], "B_CABPT_INT_ID"),
+        semantic_column(objects["ne_part"], "NE"),
+        semantic_column(objects["ne_part"], "NE_PART_NAME"),
+        semantic_column(objects["ne_part"], "NEPART_SITE_CODE"),
+        semantic_column(objects["ne_part"], "NE_TYPE"),
+    ]
+
+
 def write_snapshot_docs(repo_root: Path) -> None:
     docs = {
         "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md": "runbook snapshot",
         "docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md": "status contract snapshot",
         "docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md": "handoff snapshot",
+        "docs/runbooks/BOUNDED_JSON_EVIDENCE_SNAPSHOT_PROTOCOL.md": "bounded protocol",
+        "docs/contracts/BOUNDED_JSON_EVIDENCE_SNAPSHOT_CONTRACT.md": "bounded contract",
     }
     for relative_path, content in docs.items():
         path = repo_root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+
+def jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
 def column(name: str, data_type: str = "NUMBER", scale: int | None = 0) -> ColumnProfile:
@@ -201,6 +421,20 @@ def column(name: str, data_type: str = "NUMBER", scale: int | None = 0) -> Colum
         ordinal_position=1,
         data_type=data_type,
         numeric_scale=scale,
+        is_nullable="YES",
+    )
+
+
+def semantic_column(object_name: str, name: str, data_type: str = "VARCHAR") -> ColumnProfile:
+    return ColumnProfile(
+        database="PROD_ACCESS_DB",
+        schema="INCA_SRC",
+        object_name=object_name,
+        object_type="BASE TABLE",
+        column_name=name,
+        ordinal_position=1,
+        data_type=data_type,
+        numeric_scale=0 if data_type == "NUMBER" else None,
         is_nullable="YES",
     )
 
@@ -270,21 +504,24 @@ def test_run_manifest_includes_framework_commit_schema_contracts_and_constraints
     assert manifest["hard_constraints"]["sorter_changes_allowed"] is False
     assert manifest["hard_constraints"]["port_match_rule_changes_allowed"] is False
     assert manifest["negative_evidence_allowed"] is False
-    assert Path(manifest["runbook_path"]).parts[-3:] == (
-        "docs",
-        "runbooks",
-        "INCA_SRC_EVIDENCE_FRAMEWORK.md",
+    assert (
+        manifest["runbook_path"]
+        .replace("\\", "/")
+        .endswith("docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md")
     )
-    assert Path(manifest["status_contract_path"]).parts[-3:] == (
-        "docs",
-        "contracts",
-        "INCA_SRC_EVIDENCE_STATUS_CONTRACT.md",
+    assert (
+        manifest["status_contract_path"]
+        .replace("\\", "/")
+        .endswith("docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md")
     )
-    assert Path(manifest["handoff_path"]).parts[-3:] == (
-        "docs",
-        "ai_handoffs",
-        "INCA_SRC_EVIDENCE_HANDOFF.md",
+    assert (
+        manifest["handoff_path"]
+        .replace("\\", "/")
+        .endswith("docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md")
     )
+    assert manifest["bounded_json_snapshots"] is False
+    assert manifest["probe_sample_row_limit"] == 5
+    assert manifest["probe_deep_fetch_row_limit"] == 2500
 
 
 def test_run_folder_includes_framework_status_and_handoff_snapshots(tmp_path: Path) -> None:
@@ -296,6 +533,22 @@ def test_run_folder_includes_framework_status_and_handoff_snapshots(tmp_path: Pa
     assert (state.run_dir / "FRAMEWORK_RUNBOOK_SNAPSHOT.md").read_text() == "runbook snapshot"
     assert (state.run_dir / "STATUS_CONTRACT_SNAPSHOT.md").read_text() == "status contract snapshot"
     assert (state.run_dir / "AI_HANDOFF_SNAPSHOT.md").read_text() == "handoff snapshot"
+    assert (state.run_dir / "BOUNDED_JSON_SNAPSHOT_PROTOCOL.md").read_text() == "bounded protocol"
+    assert (state.run_dir / "BOUNDED_JSON_SNAPSHOT_CONTRACT.md").read_text() == "bounded contract"
+
+
+def test_source_manifest_and_empty_snapshot_files_exist_before_queries(tmp_path: Path) -> None:
+    state = collector.initialize_run(collector_args(tmp_path, phase="probe-only"))
+
+    manifest = json.loads((state.run_dir / "source_manifest.json").read_text())
+    decision_matrix = json.loads((state.run_dir / "probe_decision_matrix.json").read_text())
+
+    assert manifest["source_kind"] == "snowflake"
+    assert manifest["raw_row_exports"] is False
+    assert manifest["auth_context"]["secret_material_written"] is False
+    assert (state.run_dir / "profile_snapshots.jsonl").read_text() == ""
+    assert (state.run_dir / "predicate_probe_snapshots.jsonl").read_text() == ""
+    assert decision_matrix["total_probe_count"] == 0
 
 
 def test_status_split_json_is_written_before_first_snowflake_query(tmp_path: Path) -> None:
@@ -390,7 +643,7 @@ def test_status_split_preserves_passed_metadata_on_exception(tmp_path: Path) -> 
         lambda: collector.phase_build_structured_id_dictionary(state),
     )
 
-    expire_internal_deadline(state)
+    state.deadline_started_monotonic = time.monotonic() - state.config.internal_deadline_seconds - 1
     with pytest.raises(collector.InternalDeadlineExceededError):
         collector.run_phase(
             state,
@@ -432,7 +685,7 @@ def test_phase_log_and_status_split_agree_for_completed_metadata_after_timeout(
     collector.run_phase(
         state, "write_schema_profile", lambda: collector.phase_write_schema_profile(state)
     )
-    expire_internal_deadline(state)
+    state.deadline_started_monotonic = time.monotonic() - state.config.internal_deadline_seconds - 1
 
     with pytest.raises(collector.InternalDeadlineExceededError):
         collector.run_phase(
@@ -709,6 +962,201 @@ def test_seed_only_mode_does_not_run_graph_closure(tmp_path: Path) -> None:
         ]
         is False
     )
+
+
+def test_probe_only_mode_writes_bounded_json_artifacts_without_graph_closure(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path, phase="probe-only"))
+    content = column("CONTENT_INT_ID")
+    cabpt = column("CABPT_INT_ID")
+    node = node_from_value("PROD_ACCESS_DB", "INCA_SRC", "CONTENT_INT_ID", 123, "NUMBER")
+    state.metadata = {
+        "tables": [
+            {
+                "TABLE_CATALOG": "PROD_ACCESS_DB",
+                "TABLE_SCHEMA": "INCA_SRC",
+                "TABLE_NAME": "RELATION_TABLE",
+                "TABLE_TYPE": "BASE TABLE",
+                "ROW_COUNT": 1,
+            }
+        ],
+        "columns": [
+            {
+                "TABLE_CATALOG": profile.database,
+                "TABLE_SCHEMA": profile.schema,
+                "TABLE_NAME": profile.object_name,
+                "COLUMN_NAME": profile.column_name,
+                "ORDINAL_POSITION": profile.ordinal_position,
+                "DATA_TYPE": profile.data_type,
+                "NUMERIC_SCALE": profile.numeric_scale,
+                "IS_NULLABLE": profile.is_nullable,
+            }
+            for profile in (content, cabpt)
+        ],
+    }
+    state.seed_scan = collector.SeedScanResult({node.key: node}, [], 1, 1, [], [])
+
+    collector.phase_write_schema_profile(state)
+    collector.phase_build_structured_id_dictionary(state)
+    collector.phase_write_probe_snapshots(ExactScanCursor(), state)
+    collector.phase_write_final_status(state)
+
+    profile_rows = jsonl_rows(state.run_dir / "profile_snapshots.jsonl")
+    probe_rows = jsonl_rows(state.run_dir / "predicate_probe_snapshots.jsonl")
+    matrix = json.loads((state.run_dir / "probe_decision_matrix.json").read_text())
+    query_log = (state.run_dir / "query_log.csv").read_text()
+
+    assert profile_rows[0]["object_name"] == "RELATION_TABLE"
+    assert probe_rows[0]["decision"] == "SAMPLE_ONLY"
+    assert len(probe_rows[0]["sample_rows"]) <= 5
+    assert "value_digest" in probe_rows[0]["sample_rows"][0]["CONTENT_INT_ID"]
+    assert matrix["decision_counts"]["SAMPLE_ONLY"] == 1
+    assert "probe_exact_count" in query_log
+    assert "probe_exact_sample" in query_log
+    assert "run_graph_closure" not in query_log
+    assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
+
+
+def test_probe_only_high_fanout_requires_owner_approval_without_sampling(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path, phase="probe-only"))
+    content = column("CONTENT_INT_ID")
+    node = node_from_value("PROD_ACCESS_DB", "INCA_SRC", "CONTENT_INT_ID", 123, "NUMBER")
+    state.profiles = [content]
+    state.proof_by_object = {"RELATION_TABLE": [content]}
+    state.seed_scan = collector.SeedScanResult({node.key: node}, [], 1, 1, [], [])
+
+    collector.phase_write_probe_snapshots(HighFanoutProbeCursor(), state)
+
+    probe_rows = jsonl_rows(state.run_dir / "predicate_probe_snapshots.jsonl")
+    matrix = json.loads((state.run_dir / "probe_decision_matrix.json").read_text())
+
+    assert probe_rows[0]["decision"] == OWNER_APPROVAL_REQUIRED
+    assert probe_rows[0]["sample_rows"] == []
+    assert matrix["recommended_next_action"] == "REQUEST_OWNER_APPROVAL"
+    assert matrix["owner_approval_required"][0]["exact_hit_count"] == 2501
+
+
+def test_semantic_probe_writes_repeatable_dtn_candidate_without_route_proof(
+    tmp_path: Path,
+) -> None:
+    state = collector.initialize_run(collector_args(tmp_path, phase="semantic-probe"))
+    state.profiles = semantic_probe_profiles()
+
+    collector.phase_write_dtn_semantic_probe(DtnSemanticProbeCursor(), state)
+    collector.phase_write_final_status(state)
+
+    snapshot_text = (state.run_dir / "dtn_semantic_probe_snapshot.json").read_text(encoding="utf-8")
+    snapshot = json.loads(snapshot_text)
+    classification = json.loads((state.run_dir / "dtn_relation_classification.json").read_text())
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    query_log = (state.run_dir / "query_log.csv").read_text()
+
+    assert snapshot["raw_unrestricted_values_written"] is False
+    assert "BEARER-G-1" not in snapshot_text
+    assert '"_value"' not in snapshot_text
+    assert classification["counts"]["ashr1_dtn_device_rows"] == 1
+    assert classification["counts"]["dtn_cacp_rows"] == 3
+    assert classification["counts"]["dtn_cabling_rows"] == 2
+    assert classification["counts"]["cabling_peer_cacp_rows"] == 4
+    assert classification["candidate_relation_sources_found"] == {
+        "service_transmission": True,
+        "content_position_seed": True,
+        "content_connection_point_devices": True,
+        "ashr1_dtn_content_connection_point": True,
+        "connection_cabling_point": True,
+        "cabling": True,
+        "cabling_peer_cacp": True,
+    }
+    assert classification["business_proof"]["sorter_change_allowed"] is False
+    assert classification["business_proof"]["negative_evidence_allowed"] is False
+    assert statuses["Candidate relation scan"]["status"] == PASS
+    assert statuses["Edge semantics registry"]["status"] == INCOMPLETE
+    assert statuses["IC-388612 route order proof"]["status"] == INCOMPLETE
+    assert statuses["Sorter implementation change"]["status"] == "NOT_STARTED"
+    assert "semantic_dtn_cabling_by_cabpt" in query_log
+    assert "run_graph_closure" not in query_log
+    assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
+
+
+def test_dwdm_adjacency_probe_classifies_six_services_and_rejects_transmission_fanout(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="semantic-probe")
+    args.semantic_site_code = "ANY"
+    args.semantic_service_ids = (
+        "IC-388612",
+        "IC-386642",
+        "IC-386283",
+        "IC-324417",
+        "IC-392063",
+        "IC-339967",
+    )
+    state = collector.initialize_run(args)
+    state.profiles = semantic_probe_profiles()
+
+    collector.phase_write_dtn_semantic_probe(DwdmMultiServiceProbeCursor(), state)
+    collector.phase_write_final_status(state)
+
+    summary_text = (state.run_dir / "dwdm_adjacency_service_summary.json").read_text(
+        encoding="utf-8"
+    )
+    summary = json.loads(summary_text)
+    matrix = json.loads((state.run_dir / "dwdm_adjacency_decision_matrix.json").read_text())
+    predicate_rows = jsonl_rows(state.run_dir / "predicate_probe_snapshots.jsonl")
+    statuses = json.loads((state.run_dir / "status_split.json").read_text())["statuses"]
+    by_service = {row["service_id"]: row for row in summary["services"]}
+
+    assert summary["raw_unrestricted_values_written"] is False
+    assert '"_value"' not in summary_text
+    assert len(summary["services"]) == 6
+    assert by_service["IC-388612"]["decision"] == "PROVEN_DWDM_ADJACENCY"
+    assert by_service["IC-388612"]["nonblank_cabpt_rows"] == 2
+    assert by_service["IC-388612"]["dtn_cabling_rows"] == 2
+    assert by_service["IC-388612"]["usable_endpoint_pair_count"] == 2
+    assert by_service["IC-339967"]["decision"] == "TRANSMISSION_ONLY_FANOUT"
+    assert by_service["IC-339967"]["dtn_device_rows"] == 81
+    assert by_service["IC-339967"]["nonblank_cabpt_rows"] == 0
+    assert by_service["IC-339967"]["dtn_cabling_rows"] == 0
+    assert matrix["decision_counts"] == {
+        "PROVEN_DWDM_ADJACENCY": 5,
+        "TRANSMISSION_ONLY_FANOUT": 1,
+    }
+    assert matrix["sorter_change_allowed"] is False
+    assert matrix["negative_evidence_allowed"] is False
+    assert len(predicate_rows) == 6
+    assert statuses["Candidate relation scan"]["status"] == PASS
+    assert statuses["Edge semantics registry"]["status"] == INCOMPLETE
+    assert statuses["Sorter implementation change"]["status"] == "NOT_STARTED"
+    assert not (state.run_dir / "negative_evidence_ledger_entry.json").exists()
+
+
+def test_semantic_probe_records_content_fanout_count_for_owner_approval(
+    tmp_path: Path,
+) -> None:
+    args = collector_args(tmp_path, phase="semantic-probe")
+    args.semantic_site_code = "ANY"
+    args.semantic_fetch_row_limit = 10
+    args.semantic_service_ids = ("IC-339967",)
+    state = collector.initialize_run(args)
+    state.profiles = semantic_probe_profiles()
+
+    collector.phase_write_dtn_semantic_probe(DwdmMultiServiceProbeCursor(), state)
+
+    snapshot = json.loads(
+        (state.run_dir / "dtn_semantic_probe_snapshot.json").read_text(encoding="utf-8")
+    )
+    content_notes = [
+        note
+        for note in snapshot["query_notes"]
+        if str(note.get("label", "")).startswith("ccp_content_candidate_")
+    ]
+
+    assert 81 in {note["count"] for note in content_notes}
+    assert snapshot["dwdm_adjacency"]["fanout_limit_exceeded"] is True
+    assert snapshot["dwdm_adjacency"]["decision"] == OWNER_APPROVAL_REQUIRED
 
 
 def test_route_bag_seed_mode_uses_route_ids_without_service_anchor_scan(tmp_path: Path) -> None:
@@ -989,6 +1437,35 @@ def test_graph_loop_terminates_with_visited_predicates_and_row_hashes() -> None:
 def test_fanout_count_paginates_checkpoints_and_resumes() -> None:
     assert fanout_action(5, 10) == "FETCH_SINGLE_PAGE"
     assert fanout_action(11, 10) == "PAGINATE"
+
+
+def test_bounded_snapshot_decisions_and_sanitized_samples_are_source_agnostic() -> None:
+    limits = SnapshotLimits(sample_row_limit=2, deep_fetch_row_limit=10)
+    sample = sanitize_sample_rows([{"id": 123, "name": "private value"}], 2)
+    snapshot = predicate_probe_snapshot_payload(
+        run_id="run",
+        source_namespace="api",
+        object_name="/customers",
+        predicate_field="customer_id",
+        predicate_domain="CUSTOMER_ID",
+        predicate_ref="CUSTOMER_ID|123",
+        exact_hit_count=3,
+        sample_rows=[{"id": 123, "name": "private value"}],
+        count_request_id="req-count",
+        sample_request_id="req-sample",
+        elapsed_ms=12,
+        row_limit_used=2,
+        limits=limits,
+    )
+    matrix = decision_matrix_payload("run", [snapshot])
+
+    assert probe_decision(0, limits) == "COUNT_ONLY"
+    assert probe_decision(2, limits) == "SAMPLE_ONLY"
+    assert probe_decision(3, limits) == "DEEP_FETCH_CANDIDATE"
+    assert probe_decision(11, limits) == OWNER_APPROVAL_REQUIRED
+    assert sample[0]["name"]["value_digest"] != "private value"
+    assert snapshot["decision"] == "DEEP_FETCH_CANDIDATE"
+    assert matrix["recommended_next_action"] == "REVIEW_DEEP_FETCH_CANDIDATES"
 
 
 def test_fanout_marks_incomplete_only_after_failed_mitigation() -> None:

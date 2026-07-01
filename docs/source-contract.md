@@ -8,26 +8,26 @@ Lasagna owns its runtime code. It does not import from `C:\repos\Spaghetti` at r
 - Source commit: `d5871b1e17c8772ae7836b158b1a1ddd9e4566fd`
 - Strategy: owned copy, adapted into Lasagna modules.
 
-## Contract Paths Inspected
+## Current Runtime Ownership
 
-- `src/inca_sorter/models.py`
-- `src/inca_sorter/parsers.py`
-- `src/inca_sorter/sorting.py`
-- `src/inca_sorter/sorting_site_assembly.py`
-- `src/inca_sorter/sorting_topology.py`
-- `src/inca_sorter/tickets.py`
-- `src/inca_sorter/formatting.py`
-- `tests/test_sorting_characterization.py`
-- `tests/test_tickets_characterization.py`
-- `tests/test_formatting_characterization.py`
+- Snowflake combined export parsing lives in `src/lasagna/route_sorting/combined_parser.py`.
+- Route row data lives in `src/lasagna/route_sorting/route_rows.py`.
+- Workbook display-only port extraction lives in `src/lasagna/route_sorting/port_display.py`.
+- Active route ordering lives in `src/lasagna/route_sorting/combined_results.py`.
 
 ## Preserved Behaviors
 
 - `ROUTE_ORDER_METADATA` is the route-order authority for metadata-backed sorting.
+- `TRANSPORT_DEVICE_ADJACENCY` is required when same-site device continuity affects order, and DWDM endpoint matching must use `EXACT_DEVICE_PORT_MATCH` plus an approved structured `PORT_MATCH_RULE`.
+- The only approved transport endpoint proof in this PR is `CABLING_POINT_TO_PEER_CABLING_POINT`, sourced through `CONNPT_INT_ID -> CABPT_INT_ID -> V_T_INCATNT_CABLING_CURRENT -> peer CABPT_INT_ID`.
+- Platform-family labels, Ciena WS/MOTR/OTN device slot/subslot equality, G30/G40 `T<n>` parsing, and OTM/TM content-position assumptions are not accepted route proof.
+- OTM/TM client-to-line relationships fail closed unless a future evidence dossier proves explicit Snowflake relation semantics and the edge semantics registry is reviewed.
+- DTN module/card relationships fail closed unless Snowflake emits the approved cabling relation with complete endpoint fields.
+- `TL_DEVICE` is not a route-order authority and is not emitted by the current Snowflake export.
 - Partial route-order metadata fails closed for a service.
 - Migration detection and migration portion behavior come from Spaghetti route tests.
 - Workbook route sections repeat the same route columns.
-- No Spaghetti PM workspace lanes, Salesforce queue UI, maps, dashboards, release names, or branding are copied into Lasagna.
+- No Spaghetti PM workspace lanes, Salesforce queue UI, maps, dashboards, release names, heuristic sorting package, or branding are copied into Lasagna.
 
 ## Lasagna Route Workbook Columns
 

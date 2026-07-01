@@ -6,6 +6,14 @@ This framework discovers, profiles, and tests possible `PROD_ACCESS_DB.INCA_SRC`
 relationships for route blockers such as `IC-388612`. It must prove,
 fail-close, or report `INCOMPLETE` from authoritative Snowflake data only.
 
+Before any broad rerun after a fanout or timeout blocker, use the source-agnostic
+bounded snapshot protocol:
+
+```text
+docs/runbooks/BOUNDED_JSON_EVIDENCE_SNAPSHOT_PROTOCOL.md
+docs/contracts/BOUNDED_JSON_EVIDENCE_SNAPSHOT_CONTRACT.md
+```
+
 The framework is evidence collection. It is not sorter implementation. A live
 run cannot change route order, `PORT_MATCH_RULE`, or edge semantics approval.
 `IC-388612` remains `SORT FAILED` unless an accepted Snowflake relation proves
@@ -276,6 +284,12 @@ Metadata-only smoke:
 python scripts\work_pc\collect_inca_src_evidence.py --service-id IC-388612 --connection bk03716.eu-central-1 --phase metadata-only
 ```
 
+Bounded JSON probe:
+
+```powershell
+python scripts\work_pc\collect_inca_src_evidence.py --service-id IC-388612 --connection bk03716.eu-central-1 --phase probe-only
+```
+
 Full evidence run:
 
 ```powershell
@@ -295,6 +309,10 @@ blocking Snowflake queries:
 
 - `run_manifest.json`
 - `status_split.json`
+- `source_manifest.json`
+- `profile_snapshots.jsonl`
+- `predicate_probe_snapshots.jsonl`
+- `probe_decision_matrix.json`
 - `metadata_gaps.csv`
 - `coverage_matrix.csv`
 - `skipped_objects.csv`
@@ -326,6 +344,9 @@ change.
 
 Metadata-only success proves artifact durability and schema discovery only. It
 is not route proof.
+
+Probe-only success proves bounded counts/samples and fanout decisions only. It
+is not route proof, negative evidence, graph closure, or semantics approval.
 
 ## Report After Each Run
 

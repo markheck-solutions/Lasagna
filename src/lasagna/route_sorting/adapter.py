@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from lasagna.domain.route_models import RouteRow
-from lasagna.route_sorting.inca_sorter.models import InCARow
+from lasagna.route_sorting.route_rows import InCARow
 
 
 def _text(value: object) -> str:

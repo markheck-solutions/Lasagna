@@ -1,22 +1,34 @@
 """Collect sanitized INCA_SRC evidence artifacts with read-only Snowflake queries."""
 
-# ruff: noqa: F401,F403,F405,I001
+# ruff: noqa: F401,I001
+
 from __future__ import annotations
 
 import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping, cast
 
 import snowflake.connector
 
+from lasagna.evidence_snapshots import (
+    SnapshotLimits,
+    decision_matrix_payload,
+    predicate_probe_snapshot_payload,
+    probe_decision,
+    profile_snapshot_payload,
+    sanitize_sample_rows,
+    source_manifest_payload,
+    stable_digest,
+)
 from lasagna.snowflake.inca_src_discovery import (
     COVERAGE_MATRIX_COLUMNS,
     DEFAULT_DATABASE,
@@ -74,6 +86,12 @@ DOC_SNAPSHOT_FILES = {
     "FRAMEWORK_RUNBOOK_SNAPSHOT.md": "docs/runbooks/INCA_SRC_EVIDENCE_FRAMEWORK.md",
     "STATUS_CONTRACT_SNAPSHOT.md": "docs/contracts/INCA_SRC_EVIDENCE_STATUS_CONTRACT.md",
     "AI_HANDOFF_SNAPSHOT.md": "docs/ai_handoffs/INCA_SRC_EVIDENCE_HANDOFF.md",
+    "BOUNDED_JSON_SNAPSHOT_PROTOCOL.md": (
+        "docs/runbooks/BOUNDED_JSON_EVIDENCE_SNAPSHOT_PROTOCOL.md"
+    ),
+    "BOUNDED_JSON_SNAPSHOT_CONTRACT.md": (
+        "docs/contracts/BOUNDED_JSON_EVIDENCE_SNAPSHOT_CONTRACT.md"
+    ),
 }
 HARD_CONSTRAINTS = {
     "rag_proof_allowed": False,
@@ -93,9 +111,33 @@ PHASES = (
     "write_schema_profile",
     "build_structured_id_dictionary",
     "extract_service_seed_ids",
+    "write_probe_snapshots",
+    "write_dtn_semantic_probe",
     "run_exact_id_overlap_scan",
     "run_graph_closure",
     "write_final_status",
+)
+DTN_SEMANTIC_OBJECTS = {
+    "service": "V_T_INCATNT_SERVICE_TRANSMISSION_CURRENT",
+    "content_position": "V_T_INCATNT_CONTENT_POSITION_CURRENT",
+    "content_connection_point": "V_T_INCATNT_CONTENT_CONNECTION_POINT_CURRENT",
+    "connection_cabling_point": "V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT",
+    "cabling": "V_T_INCATNT_CABLING_CURRENT",
+    "ne_part": "V_T_INCATNT_NE_PART_CURRENT",
+}
+DEFAULT_DWDM_ADJACENCY_SERVICE_IDS = (
+    "IC-388612",
+    "IC-386642",
+    "IC-386283",
+    "IC-324417",
+    "IC-392063",
+    "IC-339967",
+)
+DWDM_ADJACENCY_DECISIONS = (
+    "PROVEN_DWDM_ADJACENCY",
+    "TRANSMISSION_ONLY_FANOUT",
+    "INCOMPLETE",
+    "OWNER_APPROVAL_REQUIRED",
 )
 METADATA_GAPS_COLUMNS = (
     "metadata_object",
@@ -141,6 +183,12 @@ class LiveConfig:
     phase_mode: str
     seed_mode: str
     route_seed_id_bag: Path | None
+    connection_name: str
+    probe_sample_row_limit: int
+    semantic_site_code: str
+    semantic_device_token: str
+    semantic_fetch_row_limit: int
+    semantic_service_ids: tuple[str, ...]
     internal_deadline_seconds: int
     statement_timeout_seconds: int
     framework_commit_sha: str
@@ -187,6 +235,7 @@ class RunState:
     candidates: list[dict[str, object]]
     seed_scan: SeedScanResult
     graph_scan: GraphScanResult
+    semantic_probe: dict[str, object] | None = None
     closure: object | None = None
 
 

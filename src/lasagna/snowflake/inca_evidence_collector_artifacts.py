@@ -5,11 +5,6 @@ from __future__ import annotations
 
 from .inca_evidence_collector_context import *  # noqa: F403
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
-
 
 def write_artifacts(
     run_dir: Path,

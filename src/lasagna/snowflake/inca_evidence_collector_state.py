@@ -3,17 +3,46 @@
 # ruff: noqa: F401,F403,F405,I001
 from __future__ import annotations
 
-from .inca_evidence_collector_context import *  # noqa: F403
-
 from typing import TYPE_CHECKING
+
+from .inca_evidence_collector_context import *  # noqa: F403
 
 if TYPE_CHECKING:
     from .inca_evidence_collector_artifacts import (
         metadata_has_incomplete_gap,
+        readme_text,
         registry_csv_rows,
+        run_hashes,
         set_status,
         status_payload,
     )
+    from .inca_evidence_collector_fileio import append_command_log, utc_now
+    from .inca_evidence_collector_semantic_results import semantic_probe_candidate_scan_pass
+
+
+def phase_write_final_status(state: RunState) -> None:
+    statuses = status_payload_for_state(state)
+    state.status_split = statuses
+    hashes = run_hashes(
+        state.metadata.get("tables", []),
+        state.metadata.get("columns", []),
+        state.dictionary_rows,
+        state.graph_scan.coverage_rows,
+        registry_csv_rows(state.graph_scan.evidence_rows),
+    )
+    write_json_artifact(state.run_dir / "status_split.json", statuses)
+    write_json_artifact(
+        state.run_dir / "schema_drift_invalidation_report.json", schema_drift_report({}, hashes)
+    )
+    write_json_artifact(state.run_dir / "golden_blocker_corpus.json", {"cases": []})
+    write_json_artifact(state.run_dir / "golden_blocker_results.json", {"status": INCOMPLETE})
+    if should_write_negative_ledger(state):
+        write_negative_ledger(state, hashes, statuses)
+    state.run_manifest["negative_evidence_allowed"] = should_write_negative_ledger(state)
+    state.run_manifest["run_status"] = PASS if state.config.phase_mode != "full" else INCOMPLETE
+    state.run_manifest["completed_at"] = utc_now()
+    refresh_run_manifest_counts(state)
+    (state.run_dir / "README.md").write_text(readme_text(state.config.service_id), encoding="utf-8")
 
 
 def status_payload_for_state(state: RunState) -> dict[str, object]:
@@ -60,8 +89,29 @@ def status_payload_for_state(state: RunState) -> dict[str, object]:
         "IC-388612 route order proof",
     ):
         set_status(statuses, name, INCOMPLETE, "phase not completed in this run", [])
-    set_status(statuses, "Candidate relation scan", INCOMPLETE, "candidate scan not completed", [])
-    set_status(statuses, "Edge semantics registry", INCOMPLETE, "semantics not reviewed", [])
+    if state.semantic_probe is not None:
+        candidate_status = (
+            PASS if semantic_probe_candidate_scan_pass(state.semantic_probe) else INCOMPLETE
+        )
+        set_status(
+            statuses,
+            "Candidate relation scan",
+            candidate_status,
+            "bounded DTN semantic candidate probe completed",
+            [],
+        )
+        set_status(
+            statuses,
+            "Edge semantics registry",
+            INCOMPLETE,
+            "DTN edge semantics not reviewed or approved",
+            [],
+        )
+    else:
+        set_status(
+            statuses, "Candidate relation scan", INCOMPLETE, "candidate scan not completed", []
+        )
+        set_status(statuses, "Edge semantics registry", INCOMPLETE, "semantics not reviewed", [])
     set_status(
         statuses, "Schema drift invalidation", PASS, "hashes computed for available artifacts", []
     )
@@ -181,11 +231,13 @@ def status_names_for_incomplete_phase(phase: str) -> tuple[str, ...]:
         "discover_views_metadata": ("INCA_SRC schema discovery",),
         "discover_dependencies_optional": ("Schema/profile catalog",),
         "write_schema_profile": ("Schema/profile catalog",),
+        "write_probe_snapshots": ("Bounded JSON evidence snapshots",),
         "build_structured_id_dictionary": (
             "Manifest-boundary avoidance",
             "Structured ID dictionary",
         ),
         "extract_service_seed_ids": ("IC-388612 ID extraction",),
+        "write_dtn_semantic_probe": ("Candidate relation scan", "Edge semantics registry"),
         "run_exact_id_overlap_scan": ("Exact-ID overlap scan", "Candidate relation scan"),
         "run_graph_closure": ("Evidence graph closure",),
         "write_final_status": ("Schema drift invalidation",),
@@ -224,6 +276,18 @@ def phase_artifact_paths(state: RunState, phase: str) -> list[str]:
             "edge_semantics_registry.csv",
         ],
         "run_graph_closure": ["graph_closure_summary.json"],
+        "write_probe_snapshots": [
+            "source_manifest.json",
+            "profile_snapshots.jsonl",
+            "predicate_probe_snapshots.jsonl",
+            "probe_decision_matrix.json",
+        ],
+        "write_dtn_semantic_probe": [
+            "dtn_semantic_probe_snapshot.json",
+            "dtn_relation_classification.json",
+            "dwdm_adjacency_service_summary.json",
+            "dwdm_adjacency_decision_matrix.json",
+        ],
         "write_final_status": ["status_split.json", "run_manifest.json"],
     }
     return [str(state.run_dir / item) for item in mapping.get(phase, [])]
@@ -531,132 +595,3 @@ def append_csv_row(path: Path, fieldnames: tuple[str, ...], row: dict[str, objec
         if new_file:
             writer.writeheader()
         writer.writerow(row)
-
-
-def append_command_log(state: RunState, text: str) -> None:
-    with (state.run_dir / "command_log.sql").open("a", encoding="utf-8") as handle:
-        handle.write("\n")
-        handle.write(text)
-        handle.flush()
-
-
-def empty_seed_scan() -> SeedScanResult:
-    return SeedScanResult({}, [], 0, 0, [], [])
-
-
-def empty_graph_scan() -> GraphScanResult:
-    return GraphScanResult([], [], [], [], [])
-
-
-def load_route_seed_scan(config: LiveConfig) -> SeedScanResult:
-    if config.route_seed_id_bag is None:
-        area = IncompleteArea(
-            object_name="ROUTE_SEED_ID_BAG",
-            column_name="",
-            id_node_key="",
-            expected_row_count=1,
-            fetched_row_count=0,
-            page_size=config.page_size,
-            attempted_mitigations=("provide --route-seed-id-bag",),
-            stop_reason="seed_mode route-bag requires --route-seed-id-bag",
-            resume_checkpoint="",
-        )
-        return SeedScanResult({}, [], 0, 0, [area], [])
-    payload = json_load_or_empty(config.route_seed_id_bag)
-    nodes, skipped_rows = route_seed_nodes_from_payload(config, payload)
-    seed_rows = route_seed_rows(config, payload, nodes)
-    return SeedScanResult(nodes, seed_rows, len(seed_rows), len(seed_rows), [], skipped_rows)
-
-
-def route_seed_nodes_from_payload(
-    config: LiveConfig, payload: dict[str, object]
-) -> tuple[dict[str, IdNode], list[dict[str, object]]]:
-    nodes: dict[str, IdNode] = {}
-    skipped_rows: list[dict[str, object]] = []
-    raw_nodes = payload.get("nodes", [])
-    if not isinstance(raw_nodes, list):
-        return nodes, skipped_rows
-    for raw in raw_nodes:
-        if not isinstance(raw, dict):
-            continue
-        column_name = str(raw.get("domain", "")).strip()
-        value = str(raw.get("value", "")).strip()
-        if not column_name or not value:
-            continue
-        try:
-            node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
-        except ValueError as exc:
-            skipped_rows.append(route_seed_skipped_row(config, column_name, str(exc)))
-            continue
-        nodes.setdefault(node.key, node)
-    return nodes, skipped_rows
-
-
-def route_seed_rows(
-    config: LiveConfig, payload: dict[str, object], nodes: dict[str, IdNode]
-) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    raw_nodes = payload.get("nodes", [])
-    if not isinstance(raw_nodes, list):
-        return rows
-    for raw in raw_nodes:
-        if not isinstance(raw, dict):
-            continue
-        column_name = str(raw.get("domain", "")).strip()
-        value = str(raw.get("value", "")).strip()
-        if not column_name or not value:
-            continue
-        try:
-            node = node_from_value(config.database, config.schema, column_name, value, "NUMBER")
-        except ValueError:
-            continue
-        if node.key not in nodes:
-            continue
-        rows.append(
-            {
-                "run_id": config.run_id,
-                "service_id": config.service_id,
-                "object_name": "ROUTE_SEED_ID_BAG",
-                "anchor_column": column_name,
-                "match_count": 1,
-                "row_hash": stable_hash(node.key),
-                "query_id": "",
-                "page_number": 1,
-            }
-        )
-    return rows
-
-
-def route_seed_skipped_row(
-    config: LiveConfig, column_name: str, reason_detail: str
-) -> dict[str, object]:
-    return {
-        "run_id": config.run_id,
-        "object_name": "ROUTE_SEED_ID_BAG",
-        "object_type": "ROUTE_SEED_ARTIFACT",
-        "column_name": column_name,
-        "skip_scope": "COLUMN",
-        "skip_reason_code": "ROUTE_SEED_FIELD_NOT_PROOF_GRADE",
-        "skip_reason_detail": reason_detail,
-        "required_for_full_discovery": False,
-        "causes_incomplete": False,
-        "mitigation_attempted": "field skipped before graph node creation",
-        "next_action": "add deterministic ID-domain rule only if this field is approved proof-grade",
-    }
-
-
-def merge_seed_scans(left: SeedScanResult, right: SeedScanResult) -> SeedScanResult:
-    nodes = dict(left.seed_nodes)
-    nodes.update(right.seed_nodes)
-    return SeedScanResult(
-        nodes,
-        [*left.seed_rows, *right.seed_rows],
-        left.searched_anchor_columns + right.searched_anchor_columns,
-        left.exact_anchor_hits + right.exact_anchor_hits,
-        [*left.incomplete_areas, *right.incomplete_areas],
-        [*left.skipped_rows, *right.skipped_rows],
-    )
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat()

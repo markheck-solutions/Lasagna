@@ -34,7 +34,7 @@ C:\Users\<you>\Desktop\LasagnaRouteReviews
 Run on the machine that owns Snowflake access:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\work_pc\run_lasagna_live_batch.ps1 -ServiceId IC-123456 -ServiceId ICB-123456
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\work_pc\run_lasagna_live_batch.ps1 -IdsText "IC-123456 ICB-123456"
 ```
 
 The raw combined CSV is temporary and is deleted by default after workbook generation.

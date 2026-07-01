@@ -3,18 +3,23 @@
 # ruff: noqa: F401,F403,F405,I001
 from __future__ import annotations
 
-from .inca_evidence_collector_context import *  # noqa: F403
-
 from typing import TYPE_CHECKING
+
+from .inca_evidence_collector_context import *  # noqa: F403
 
 if TYPE_CHECKING:
     from .inca_evidence_collector_artifacts import write_command_log
-    from .inca_evidence_collector_phases import run_collector_phases
-    from .inca_evidence_collector_state import (
+    from .inca_evidence_collector_fileio import (
         empty_graph_scan,
         empty_seed_scan,
-        mark_incomplete_after_exception,
         utc_now,
+        write_jsonl_artifact,
+        write_source_manifest,
+    )
+    from .inca_evidence_collector_phases import run_collector_phases
+    from .inca_evidence_collector_probe_snapshots import probe_limits
+    from .inca_evidence_collector_state import (
+        mark_incomplete_after_exception,
         write_checkpoint,
         write_progress_summary,
     )
@@ -34,9 +39,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pages-per-predicate", type=int, default=25)
     parser.add_argument(
         "--phase",
-        choices=("full", "metadata-only", "seed-only"),
+        choices=(
+            "full",
+            "metadata-only",
+            "seed-only",
+            "probe-only",
+            "snapshot-only",
+            "semantic-probe",
+        ),
         default="full",
-        help="Run full evidence, metadata-only smoke, or seed-only smoke.",
+        help=(
+            "Run full evidence, metadata-only smoke, seed-only smoke, bounded JSON "
+            "probe snapshots, or bounded DTN semantic candidate probing."
+        ),
     )
     parser.add_argument(
         "--seed-mode",
@@ -45,6 +60,17 @@ def parse_args() -> argparse.Namespace:
         help="Choose IC seed source. route-bag uses a route-derived structured ID artifact.",
     )
     parser.add_argument("--route-seed-id-bag", type=Path, default=None)
+    parser.add_argument("--semantic-site-code", default="ASH/R1")
+    parser.add_argument("--semantic-device-token", default="DTN")
+    parser.add_argument("--semantic-fetch-row-limit", type=int, default=125)
+    parser.add_argument(
+        "--semantic-service-ids",
+        default="",
+        help=(
+            "Optional comma/space separated service IDs for one bounded DWDM adjacency "
+            "semantic-probe run. Defaults to --service-id."
+        ),
+    )
     parser.add_argument(
         "--internal-deadline-seconds",
         type=int,
@@ -55,6 +81,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_STATEMENT_TIMEOUT_SECONDS,
     )
+    parser.add_argument("--probe-sample-row-limit", type=int, default=5)
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
     parser.add_argument(
@@ -64,6 +91,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--start-fresh", action="store_true")
     return parser.parse_args()
+
+
+def parse_semantic_service_ids(primary_service_id: str, raw_service_ids: object) -> tuple[str, ...]:
+    if isinstance(raw_service_ids, (list, tuple)):
+        tokens = [str(token).strip() for token in raw_service_ids if str(token).strip()]
+    else:
+        tokens = [
+            token.strip() for token in re.split(r"[\s,;]+", str(raw_service_ids)) if token.strip()
+        ]
+    service_ids = tokens or [primary_service_id]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for service_id in service_ids:
+        normalized = service_id.upper()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return tuple(deduped)
 
 
 def main() -> int:
@@ -109,6 +155,14 @@ def initialize_run(args: argparse.Namespace) -> RunState:
         phase_mode=args.phase,
         seed_mode=args.seed_mode,
         route_seed_id_bag=Path(args.route_seed_id_bag) if args.route_seed_id_bag else None,
+        connection_name=args.connection,
+        probe_sample_row_limit=args.probe_sample_row_limit,
+        semantic_site_code=str(getattr(args, "semantic_site_code", "ASH/R1")),
+        semantic_device_token=str(getattr(args, "semantic_device_token", "DTN")),
+        semantic_fetch_row_limit=int(getattr(args, "semantic_fetch_row_limit", 125)),
+        semantic_service_ids=parse_semantic_service_ids(
+            args.service_id, getattr(args, "semantic_service_ids", "")
+        ),
         internal_deadline_seconds=args.internal_deadline_seconds,
         statement_timeout_seconds=args.statement_timeout_seconds,
         framework_commit_sha=resolve_framework_commit(args.repo_root, args.framework_commit),
@@ -177,6 +231,15 @@ def initial_run_manifest(config: LiveConfig, run_dir: Path) -> dict[str, object]
         "route_seed_id_bag": ""
         if config.route_seed_id_bag is None
         else str(config.route_seed_id_bag),
+        "connection_name": config.connection_name,
+        "bounded_json_snapshots": config.phase_mode
+        in {"probe-only", "snapshot-only", "semantic-probe"},
+        "probe_sample_row_limit": config.probe_sample_row_limit,
+        "probe_deep_fetch_row_limit": probe_limits(config).deep_fetch_row_limit,
+        "semantic_site_code": config.semantic_site_code,
+        "semantic_device_token": config.semantic_device_token,
+        "semantic_fetch_row_limit": config.semantic_fetch_row_limit,
+        "semantic_service_ids": list(config.semantic_service_ids),
         "run_dir": str(run_dir),
         "started_at": utc_now(),
         "completed_at": "",
@@ -208,6 +271,13 @@ def write_baseline_artifacts(state: RunState) -> None:
         write_csv_artifact(state.run_dir / "query_log.csv", QUERY_LOG_COLUMNS, ())
         write_csv_artifact(state.run_dir / "phase_log.csv", PHASE_LOG_COLUMNS, ())
         write_progress_summary(state, "initialize_run")
+        write_source_manifest(state)
+        write_jsonl_artifact(state.run_dir / "profile_snapshots.jsonl", ())
+        write_jsonl_artifact(state.run_dir / "predicate_probe_snapshots.jsonl", ())
+        write_json_artifact(
+            state.run_dir / "probe_decision_matrix.json",
+            decision_matrix_payload(state.config.run_id, ()),
+        )
         write_json_artifact(
             state.run_dir / "graph_closure_summary.json",
             graph_closure_summary_payload(

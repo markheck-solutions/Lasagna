@@ -1,5 +1,5 @@
 from lasagna.route_sorting.adapter import build_site_location_lookup, route_row_from_inca
-from lasagna.route_sorting.inca_sorter.models import InCARow
+from lasagna.route_sorting.route_rows import InCARow
 
 
 def test_route_row_from_inca_maps_to_lasagna_18_column_contract() -> None:
