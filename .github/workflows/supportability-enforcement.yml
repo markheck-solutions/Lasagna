@@ -99,28 +99,36 @@ jobs:
           if not runs:
               print(f"No Supportability Enforcement run found for PR #{pr_number} at {head_sha}; no rerun.")
               raise SystemExit(0)
-          latest = sorted(runs, key=lambda run: str(run.get("created_at") or ""), reverse=True)[0]
-          run_id = latest["id"]
-          status = latest.get("status")
-          conclusion = latest.get("conclusion")
-          if status != "completed":
-              print(f"Supportability run {run_id} is {status}; no rerun.")
-              raise SystemExit(0)
-          if conclusion == "success":
-              print(f"Supportability run {run_id} is already success; no rerun.")
-              raise SystemExit(0)
-          if conclusion == "failure":
+          def newest(items):
+              return sorted(items, key=lambda run: str(run.get("created_at") or ""), reverse=True)[0]
+
+          failed_runs = [run for run in runs if run.get("status") == "completed" and run.get("conclusion") == "failure"]
+          if failed_runs:
+              run_id = newest(failed_runs)["id"]
               gh_api("-X", "POST", f"repos/{repository}/actions/runs/{run_id}/rerun-failed-jobs")
               print(f"Requested failed-job rerun for PR-head supportability run {run_id}.")
               raise SystemExit(0)
-          gh_api("-X", "POST", f"repos/{repository}/actions/runs/{run_id}/rerun")
-          print(f"Requested full rerun for PR-head supportability run {run_id}.")
+
+          rerunnable_runs = [run for run in runs if run.get("status") == "completed" and run.get("conclusion") != "success"]
+          if rerunnable_runs:
+              run_id = newest(rerunnable_runs)["id"]
+              gh_api("-X", "POST", f"repos/{repository}/actions/runs/{run_id}/rerun")
+              print(f"Requested full rerun for PR-head supportability run {run_id}.")
+              raise SystemExit(0)
+
+          latest = newest(runs)
+          run_id = latest["id"]
+          status = latest.get("status")
+          if status != "completed":
+              print(f"Supportability run {run_id} is {status}; no rerun.")
+              raise SystemExit(0)
+          print(f"Supportability run {run_id} is already success; no rerun.")
           PY
 
   baseline-supportability:
     name: Baseline Protected Supportability Gate
     if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && github.event.pull_request.base.ref == 'main' }}
-    uses: markheck-solutions/governance/.github/workflows/supportability-gate.yml@cc1795ae03f45901e2d7b0dce587398361d06966
+    uses: markheck-solutions/governance/.github/workflows/supportability-gate.yml@79191d560261622691574997025379aa12a86e7a
     with:
       target-repository: ${{ github.repository }}
       target-repository-url: https://github.com/${{ github.repository }}.git
@@ -128,13 +136,13 @@ jobs:
       target-head-sha: ${{ github.event.pull_request.head.sha }}
       target-pr-number: ${{ github.event.pull_request.number }}
       target-pr-url: ${{ github.event.pull_request.html_url }}
-      governance-ref: cc1795ae03f45901e2d7b0dce587398361d06966
+      governance-ref: 79191d560261622691574997025379aa12a86e7a
       artifact-name: baseline-supportability-gate-evidence
 
   candidate-supportability:
     name: Candidate Supportability Gate
     if: ${{ (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && github.event.pull_request.base.ref == 'main' }}
-    uses: markheck-solutions/governance/.github/workflows/supportability-gate.yml@cc1795ae03f45901e2d7b0dce587398361d06966
+    uses: markheck-solutions/governance/.github/workflows/supportability-gate.yml@79191d560261622691574997025379aa12a86e7a
     with:
       target-repository: ${{ github.repository }}
       target-repository-url: https://github.com/${{ github.repository }}.git
@@ -142,7 +150,7 @@ jobs:
       target-head-sha: ${{ github.event.pull_request.head.sha }}
       target-pr-number: ${{ github.event.pull_request.number }}
       target-pr-url: ${{ github.event.pull_request.html_url }}
-      governance-ref: cc1795ae03f45901e2d7b0dce587398361d06966
+      governance-ref: 79191d560261622691574997025379aa12a86e7a
       artifact-name: candidate-supportability-gate-evidence
 
   delivery-receipt:
@@ -151,7 +159,7 @@ jobs:
       - baseline-supportability
       - candidate-supportability
     if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_review') && github.event.pull_request.base.ref == 'main' }}
-    uses: markheck-solutions/governance/.github/workflows/delivery-receipt.yml@cc1795ae03f45901e2d7b0dce587398361d06966
+    uses: markheck-solutions/governance/.github/workflows/delivery-receipt.yml@79191d560261622691574997025379aa12a86e7a
     with:
       target-repository: ${{ github.repository }}
       target-repository-url: https://github.com/${{ github.repository }}.git
@@ -159,7 +167,7 @@ jobs:
       target-head-sha: ${{ github.event.pull_request.head.sha }}
       target-pr-number: ${{ github.event.pull_request.number }}
       target-pr-url: ${{ github.event.pull_request.html_url }}
-      governance-ref: cc1795ae03f45901e2d7b0dce587398361d06966
+      governance-ref: 79191d560261622691574997025379aa12a86e7a
       supportability-artifact-name: baseline-supportability-gate-evidence
       supportability-artifact-id: ${{ needs['baseline-supportability'].outputs['artifact-id'] || 'missing-baseline-supportability-artifact-id' }}
       supportability-artifact-digest: ${{ needs['baseline-supportability'].outputs['artifact-digest'] || 'missing-baseline-supportability-artifact-digest' }}
