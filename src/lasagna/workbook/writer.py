@@ -30,6 +30,7 @@ SUMMARY_COLUMNS: tuple[str, ...] = (
 INVALID_ID_MESSAGE = "Invalid service ID; expected IC-123456 or ICB-123456."
 NO_MIGRATION_MESSAGE = "No migration portion found."
 NO_ROUTE_ROWS_MESSAGE = "No route rows found."
+FAILED_SOURCE_ROWS_TITLE = "Source Route Rows (Not Route Proof)"
 CellValue = str | int | None
 
 
@@ -115,10 +116,15 @@ def _write_service_sheet(
     _write_cell_value(ws, 3, 1, "Message")
     _write_cell_value(ws, 3, 2, service_result.message)
 
+    route_title = (
+        FAILED_SOURCE_ROWS_TITLE
+        if service_result.status == "SORT FAILED" and service_result.sorted_rows
+        else "Sorted Route Path"
+    )
     row_number = _write_route_section(
         ws,
         5,
-        "Sorted Route Path",
+        route_title,
         service_result.sorted_rows,
         NO_ROUTE_ROWS_MESSAGE,
     )

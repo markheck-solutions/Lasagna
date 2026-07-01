@@ -36,6 +36,8 @@ from lasagna.route_sorting.contract import ROUTE_ORDER_AUTHORITY
 from lasagna.route_sorting.port_display import extract_port_address
 from lasagna.route_sorting.route_rows import InCARow
 
+FAILED_SOURCE_ROWS_NOT_PROOF = "SOURCE_ROWS_NOT_ROUTE_PROOF"
+
 
 def _route_order_source(info_lines: list[str]) -> str:
     if f"Route order: {ROUTE_ORDER_AUTHORITY}" in info_lines:
@@ -283,6 +285,29 @@ def _populate_device_display_points(rows: list[InCARow]) -> None:
             row.display_points = extract_port_address(row)
 
 
+def _failed_sort_display_rows(
+    rows: list[InCARow],
+    route_order_metadata: list[dict[str, Any]] | None,
+    service_id: str,
+) -> list[InCARow]:
+    """Return source rows in best available metadata order without proving route order."""
+    try:
+        edges = _service_contract_edges(route_order_metadata, service_id)
+    except StructuredRouteContractError:
+        return list(rows)
+
+    edge_by_route = {edge.route_path: edge for edge in edges}
+
+    def sort_key(row: InCARow) -> tuple[object, ...]:
+        edge = edge_by_route.get(row.route_path)
+        sequence = edge.edge_sequence if edge is not None else 999_999
+        side = (row.site_side or "").strip().upper()
+        side_rank = {"A": 0, "B": 1}.get(side, 2)
+        return (sequence, side_rank, row.pos, row.site_code)
+
+    return sorted(rows, key=sort_key)
+
+
 def sort_combined_csv_to_service_results(
     combined_csv_path: Path,
     service_ids: list[str],
@@ -311,7 +336,18 @@ def sort_combined_csv_to_service_results(
             _populate_device_display_points(sorted_rows)
             _populate_device_display_points(migration_rows)
         except Exception as exc:
-            results[service_id] = ServiceRouteResult.sort_failed(service_id, str(exc))
+            display_rows = _failed_sort_display_rows(
+                rows,
+                combined_data.route_order_metadata,
+                service_id,
+            )
+            _populate_device_display_points(display_rows)
+            results[service_id] = ServiceRouteResult.sort_failed(
+                service_id,
+                (f"{exc} Source rows shown for troubleshooting only; not route proof."),
+                route_rows_from_inca(display_rows, site_locations),
+                route_order_source=FAILED_SOURCE_ROWS_NOT_PROOF,
+            )
             continue
 
         results[service_id] = ServiceRouteResult.ok(
