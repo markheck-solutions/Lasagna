@@ -57,6 +57,30 @@ _ROUTER_FUNCTION_PREFIXES: tuple[str, ...] = (
     "EX4600",
 )
 
+_ROUTER_NE_TYPE_PREFIXES: tuple[str, ...] = (
+    "NCS-",
+    "NCS ",
+    "ASR-",
+    "DCS-",
+    "ALU ",
+    "C1111",
+    "C1121",
+    "892",
+    "1841",
+    "1921",
+    "1941",
+    "2921",
+    "4500",
+    "4900",
+    "8201",
+    "8212",
+    "7280",
+    "R660",
+    "TI-PG",
+    "EX3400",
+    "EX4600",
+)
+
 
 def _is_planned(value: str | None) -> bool:
     return bool(value and value.strip().lower() == "planned")
@@ -65,6 +89,11 @@ def _is_planned(value: str | None) -> bool:
 def _is_router_function(ne_function: str) -> bool:
     upper = ne_function.upper()
     return any(prefix in upper for prefix in _ROUTER_FUNCTION_PREFIXES)
+
+
+def _is_router_ne_type(ne_type: str) -> bool:
+    upper = ne_type.strip().upper()
+    return any(upper.startswith(prefix) for prefix in _ROUTER_NE_TYPE_PREFIXES)
 
 
 @dataclass
@@ -135,7 +164,10 @@ class InCARow:
     def is_router(self) -> bool:
         """Structured router/switch classification from Snowflake fields."""
         if self.ne_type:
-            return self.ne_type not in _TRANSMISSION_NE_TYPES
+            if _is_router_ne_type(self.ne_type):
+                return True
+            if self.ne_type.upper() in _TRANSMISSION_NE_TYPES:
+                return False
         if self.ne_function:
             return _is_router_function(self.ne_function)
         return False
