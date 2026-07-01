@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ def test_repo_hygiene_suppresses_secret_hit_details(tmp_path: Path) -> None:
 
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             str(Path("scripts/quality_gates/check_repo_hygiene.py").resolve()),
             "--repo-root",
             str(repo),
