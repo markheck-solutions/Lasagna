@@ -897,149 +897,6 @@ device_row_keys AS (
       AND slot IS NOT NULL
       AND subslot IS NOT NULL
 ),
-device_endpoint_candidates AS (
-    SELECT DISTINCT
-        endpoint_sites.*,
-        device_row_keys.ne_type AS device_ne_type,
-        device_row_keys.ne_function AS device_ne_function,
-        device_row_keys.device_route_path,
-        device_row_keys.device_slot,
-        device_row_keys.device_subslot,
-        device_row_keys.device_connection_point_nr,
-        device_row_keys.device_platform_family AS platform_family,
-        CASE
-            WHEN device_row_keys.device_subslot = endpoint_sites.connection_point_nr
-                THEN 'DEVICE_SUBSLOT_EQUALS_CCP_CONNECTION_POINT_NR'
-            WHEN device_row_keys.device_platform_family = 'G30_G40'
-                AND REGEXP_LIKE(UPPER(device_row_keys.device_subslot), '^T[0-9]+$')
-                AND LTRIM(REGEXP_REPLACE(UPPER(device_row_keys.device_subslot), '^T', ''), '0')
-                    = LTRIM(endpoint_sites.connection_point_nr, '0')
-                THEN 'T_PORT_TO_CONNECTION_POINT_NR'
-            ELSE NULL
-        END AS port_match_rule,
-        'prod_transport_device_endpoint_rows + prod_device_rows' AS port_match_source_view,
-        OBJECT_CONSTRUCT(
-            'edge_position_id', endpoint_sites.edge_position_id,
-            'edge_position_path', endpoint_sites.edge_position_path,
-            'path_text', endpoint_sites.path_text,
-            'endpoint_location', endpoint_sites.location,
-            'device_route_path', device_row_keys.device_route_path,
-            'device_content', device_row_keys.device_content,
-            'device_content_int_id', device_row_keys.device_content_int_id,
-            'metadata_a_site_code', tx.A_SITE_CODE,
-            'metadata_b_site_code', tx.B_SITE_CODE
-        )::VARCHAR AS port_match_source_ids
-    FROM endpoint_sites
-    JOIN prod_transmission_metadata_rows tx
-        ON tx.BPK_TRANSMISSION = endpoint_sites.edge_name
-        AND endpoint_sites.device_site_code IN (tx.A_SITE_CODE, tx.B_SITE_CODE)
-    JOIN device_row_keys
-        ON device_row_keys.service_id = endpoint_sites.service_id
-        AND device_row_keys.device_site_code = endpoint_sites.device_site_code
-        AND device_row_keys.ne = endpoint_sites.ne
-        AND device_row_keys.ne_part = endpoint_sites.ne_part
-        AND device_row_keys.device_slot = endpoint_sites.slot
-    WHERE endpoint_sites.slot IS NOT NULL
-      AND endpoint_sites.connection_point_nr IS NOT NULL
-      AND device_row_keys.device_platform_family <> 'DTN'
-),
-content_position_endpoint_candidates AS (
-    SELECT DISTINCT
-        endpoint_sites.*,
-        device_row_keys.ne_type AS device_ne_type,
-        device_row_keys.ne_function AS device_ne_function,
-        device_row_keys.device_route_path,
-        device_row_keys.device_slot,
-        device_row_keys.device_subslot,
-        device_row_keys.device_connection_point_nr,
-        device_row_keys.device_platform_family AS platform_family,
-        'CONTENT_POSITION_TO_LINE_ENDPOINT' AS port_match_rule,
-        'prod_transport_device_endpoint_rows + prod_device_rows'
-            AS port_match_source_view,
-        OBJECT_CONSTRUCT(
-            'edge_position_id', endpoint_sites.edge_position_id,
-            'edge_position_path', endpoint_sites.edge_position_path,
-            'path_text', endpoint_sites.path_text,
-            'endpoint_location', endpoint_sites.location,
-            'device_route_path', device_row_keys.device_route_path,
-            'device_content', device_row_keys.device_content,
-            'device_content_int_id', device_row_keys.device_content_int_id
-        )::VARCHAR AS port_match_source_ids
-    FROM endpoint_sites
-    JOIN device_row_keys
-        ON device_row_keys.service_id = endpoint_sites.service_id
-        AND device_row_keys.device_site_code = endpoint_sites.device_site_code
-        AND device_row_keys.ne = endpoint_sites.ne
-        AND device_row_keys.ne_part = endpoint_sites.ne_part
-        AND device_row_keys.device_slot = endpoint_sites.slot
-        AND device_row_keys.device_platform_family = 'OTM_TM'
-    WHERE endpoint_sites.slot IS NOT NULL
-      AND endpoint_sites.subslot IS NOT NULL
-      AND device_row_keys.device_subslot = endpoint_sites.subslot
-      AND endpoint_sites.level_no > 1
-    UNION ALL
-    SELECT DISTINCT
-        walk.service_id,
-        walk.edge_name,
-        walk.level_no,
-        walk.level_tag,
-        walk.parent_edge_name,
-        walk.edge_position,
-        walk.edge_position_id,
-        walk.edge_position_path,
-        walk.path_text,
-        NULL AS connpt_int_id,
-        device_row_keys.device_site_code,
-        device_row_keys.device_site_type,
-        device_row_keys.ne,
-        device_row_keys.ne_part,
-        device_row_keys.optic_function AS function,
-        device_row_keys.device_connection_point_nr AS connection_point_nr,
-        device_row_keys.device_slot AS slot,
-        device_row_keys.device_subslot AS subslot,
-        device_row_keys.device_location AS location,
-        device_row_keys.ne_type AS device_ne_type,
-        device_row_keys.ne_function AS device_ne_function,
-        device_row_keys.device_route_path,
-        device_row_keys.device_slot,
-        device_row_keys.device_subslot,
-        device_row_keys.device_connection_point_nr,
-        device_row_keys.device_platform_family AS platform_family,
-        'CONTENT_POSITION_TO_LINE_ENDPOINT' AS port_match_rule,
-        'V_T_INCATNT_CONTENT_POSITION_CURRENT + prod_edge_walk + prod_device_rows'
-            AS port_match_source_view,
-        OBJECT_CONSTRUCT(
-            'edge_position_id', walk.edge_position_id,
-            'edge_position_path', walk.edge_position_path,
-            'path_text', walk.path_text,
-            'device_location', device_row_keys.device_location,
-            'device_route_path', device_row_keys.device_route_path,
-            'device_content', device_row_keys.device_content,
-            'device_content_int_id', device_row_keys.device_content_int_id,
-            'child_parent_child_int_id', child_parent.CHILD_INT_ID,
-            'child_parent_transmission_intid', child_parent.TRANSMISSION_INTID,
-            'edge_parent_child_int_id', edge_parent.CHILD_INT_ID,
-            'edge_parent_bfk_transmission', edge_parent.BFK_TRANSMISSION,
-            'metadata_a_site_code', tx.A_SITE_CODE,
-            'metadata_b_site_code', tx.B_SITE_CODE
-        )::VARCHAR AS port_match_source_ids
-    FROM prod_edge_walk walk
-    JOIN prod_transmission_metadata_rows tx
-        ON tx.BPK_TRANSMISSION = walk.edge_name
-    JOIN device_row_keys
-        ON device_row_keys.service_id = walk.service_id
-        AND device_row_keys.device_platform_family = 'OTM_TM'
-    JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_POSITION_CURRENT child_parent
-        ON child_parent.CHILD_INT_ID = device_row_keys.device_content_int_id
-    JOIN prod_access_db.inca_src.V_T_INCATNT_CONTENT_POSITION_CURRENT edge_parent
-        ON edge_parent.CHILD_INT_ID = child_parent.TRANSMISSION_INTID
-        AND edge_parent.BFK_TRANSMISSION = walk.edge_name
-    WHERE device_row_keys.device_content_int_id IS NOT NULL
-      AND device_row_keys.device_slot IS NOT NULL
-      AND device_row_keys.device_subslot IS NOT NULL
-      AND walk.level_no > 1
-      AND device_row_keys.device_site_code IN (tx.A_SITE_CODE, tx.B_SITE_CODE)
-),
 dwdm_cabling_endpoint_candidates AS (
     SELECT DISTINCT
         endpoint_sites.*,
@@ -1071,7 +928,6 @@ dwdm_cabling_endpoint_candidates AS (
         AND device_row_keys.ne = endpoint_sites.ne
         AND device_row_keys.ne_part = endpoint_sites.ne_part
         AND device_row_keys.device_slot = endpoint_sites.slot
-        AND device_row_keys.device_platform_family = 'DTN'
     JOIN prod_access_db.inca_src.V_T_INCATNT_CONNECTION_CABLING_POINT_CURRENT endpoint_cacp
         ON TO_VARCHAR(endpoint_cacp.CONNPT_INT_ID) = TO_VARCHAR(endpoint_sites.connpt_int_id)
         AND endpoint_cacp.CABPT_INT_ID IS NOT NULL
@@ -1095,15 +951,8 @@ dwdm_cabling_endpoint_candidates AS (
       AND endpoint_sites.slot IS NOT NULL
 ),
 candidate_endpoint_sites AS (
-    SELECT device_endpoint_candidates.*, 'EXACT_DEVICE_PORT_MATCH' AS endpoint_proof_source, 1 AS proof_priority
-    FROM device_endpoint_candidates
-    WHERE port_match_rule IS NOT NULL
-    UNION ALL
     SELECT dwdm_cabling_endpoint_candidates.*, 'EXACT_DEVICE_PORT_MATCH' AS endpoint_proof_source, 1 AS proof_priority
     FROM dwdm_cabling_endpoint_candidates
-    UNION ALL
-    SELECT content_position_endpoint_candidates.*, 'EXACT_DEVICE_PORT_MATCH' AS endpoint_proof_source, 0 AS proof_priority
-    FROM content_position_endpoint_candidates
 ),
 candidate_site_counts AS (
     SELECT

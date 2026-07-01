@@ -97,20 +97,16 @@ def test_transport_device_adjacency_uses_recursive_ccp_endpoint_facts() -> None:
     assert "DEVICE_CONTENT_INT_ID" in template
     assert "AND device_row_keys.device_site_code = endpoint_sites.device_site_code" in template
     assert "AND device_row_keys.device_slot = endpoint_sites.slot" in template
-    assert "device_row_keys.device_subslot = endpoint_sites.connection_point_nr" in template
-    assert "device_row_keys.device_platform_family <> 'DTN'" in template
-    assert "T_PORT_TO_CONNECTION_POINT_NR" in template
-    assert "content_position_endpoint_candidates AS" in template
-    assert "CONTENT_POSITION_TO_LINE_ENDPOINT" in template
-    assert "child_parent.CHILD_INT_ID = device_row_keys.device_content_int_id" in template
-    assert "edge_parent.CHILD_INT_ID = child_parent.TRANSMISSION_INTID" in template
-    assert "edge_parent.BFK_TRANSMISSION = walk.edge_name" in template
-    assert "tx.BPK_TRANSMISSION = endpoint_sites.edge_name" in template
-    assert "tx.BPK_TRANSMISSION = walk.edge_name" in template
-    assert "device_row_keys.device_site_code IN (tx.A_SITE_CODE, tx.B_SITE_CODE)" in template
-    assert "endpoint_sites.level_no > 1" in template
-    assert "walk.level_no > 1" in template
-    assert "device_row_keys.device_subslot = endpoint_sites.subslot" in template
+    assert "device_endpoint_candidates AS" not in template
+    assert "DEVICE_SUBSLOT_EQUALS_CCP_CONNECTION_POINT_NR" not in template
+    assert "T_PORT_TO_CONNECTION_POINT_NR" not in template
+    assert "content_position_endpoint_candidates AS" not in template
+    assert "CONTENT_POSITION_TO_LINE_ENDPOINT" not in template
+    assert "child_parent.CHILD_INT_ID = device_row_keys.device_content_int_id" not in template
+    assert "edge_parent.CHILD_INT_ID = child_parent.TRANSMISSION_INTID" not in template
+    assert "edge_parent.BFK_TRANSMISSION = walk.edge_name" not in template
+    assert "device_row_keys.device_subslot = endpoint_sites.connection_point_nr" not in template
+    assert "device_row_keys.device_subslot = endpoint_sites.subslot" not in template
     assert "dwdm_cabling_endpoint_candidates AS" in template
     assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
     assert (
@@ -142,18 +138,29 @@ def test_transport_device_adjacency_uses_recursive_ccp_endpoint_facts() -> None:
     assert "PATH_TEXT" in template
 
 
-def test_dwdm_adjacency_requires_cabling_backed_dtn_not_fanout() -> None:
+def test_dwdm_adjacency_requires_cabling_backed_relation_not_platform_gate() -> None:
     template = Path(SQL_TEMPLATE_PATH).read_text(encoding="utf-8")
+    cabling_block = template.split("dwdm_cabling_endpoint_candidates AS", 1)[1].split(
+        "candidate_endpoint_sites AS", 1
+    )[0]
 
-    assert "device_row_keys.device_platform_family <> 'DTN'" in template
     assert "dwdm_cabling_endpoint_candidates AS" in template
-    assert "AND device_row_keys.device_platform_family = 'DTN'" in template
+    assert "device_row_keys.device_platform_family <> 'DTN'" not in template
+    assert "AND device_row_keys.device_platform_family = 'DTN'" not in template
+    assert "device_row_keys.device_platform_family = 'G30_G40'" not in template
+    assert "DEVICE_SUBSLOT_EQUALS_CCP_CONNECTION_POINT_NR" not in template
+    assert "T_PORT_TO_CONNECTION_POINT_NR" not in template
+    assert "CONTENT_POSITION_TO_LINE_ENDPOINT" not in template
+    assert "REGEXP_LIKE(UPPER(device_row_keys.device_subslot), '^T[0-9]+$')" not in template
     assert "WHERE endpoint_sites.connpt_int_id IS NOT NULL" in template
     assert "endpoint_cacp.CABPT_INT_ID IS NOT NULL" in template
     assert "JOIN prod_access_db.inca_src.V_T_INCATNT_CABLING_CURRENT cab" in template
     assert "peer_cacp.CABPT_INT_ID IS NOT NULL" in template
     assert "peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID" in template
     assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
+    assert "device_row_keys.device_platform_family =" not in cabling_block
+    assert "UPPER(COALESCE(ne_type" not in cabling_block
+    assert "LIKE" not in cabling_block
     assert "endpoint_row_count = 2" in template
     assert "endpoint_site_count IN (1, 2)" in template
 

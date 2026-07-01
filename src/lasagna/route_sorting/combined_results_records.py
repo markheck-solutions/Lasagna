@@ -177,15 +177,11 @@ def _transport_adjacency_from_record(record: dict[str, Any]) -> TransportDeviceA
     endpoint_1_device_connection_point_nr = _text(
         record.get("ENDPOINT_1_DEVICE_CONNECTION_POINT_NR")
     )
-    endpoint_1_device_slot = _text(record.get("ENDPOINT_1_DEVICE_SLOT")) or endpoint_1_slot
-    endpoint_1_device_subslot = (
-        _text(record.get("ENDPOINT_1_DEVICE_SUBSLOT")) or endpoint_1_connection_point_nr
-    )
-    endpoint_1_ccp_connection_point_nr = (
-        _text(record.get("ENDPOINT_1_CCP_CONNECTION_POINT_NR")) or endpoint_1_connection_point_nr
-    )
-    endpoint_1_ccp_slot = _text(record.get("ENDPOINT_1_CCP_SLOT")) or endpoint_1_slot
-    endpoint_1_ccp_subslot = _text(record.get("ENDPOINT_1_CCP_SUBSLOT")) or endpoint_1_subslot
+    endpoint_1_device_slot = _text(record.get("ENDPOINT_1_DEVICE_SLOT"))
+    endpoint_1_device_subslot = _text(record.get("ENDPOINT_1_DEVICE_SUBSLOT"))
+    endpoint_1_ccp_connection_point_nr = _text(record.get("ENDPOINT_1_CCP_CONNECTION_POINT_NR"))
+    endpoint_1_ccp_slot = _text(record.get("ENDPOINT_1_CCP_SLOT"))
+    endpoint_1_ccp_subslot = _text(record.get("ENDPOINT_1_CCP_SUBSLOT"))
     endpoint_2_ne = _text(record.get("ENDPOINT_2_NE"))
     endpoint_2_ne_part = _text(record.get("ENDPOINT_2_NE_PART"))
     endpoint_2_connection_point_nr = _text(record.get("ENDPOINT_2_CONNECTION_POINT_NR"))
@@ -194,15 +190,11 @@ def _transport_adjacency_from_record(record: dict[str, Any]) -> TransportDeviceA
     endpoint_2_device_connection_point_nr = _text(
         record.get("ENDPOINT_2_DEVICE_CONNECTION_POINT_NR")
     )
-    endpoint_2_device_slot = _text(record.get("ENDPOINT_2_DEVICE_SLOT")) or endpoint_2_slot
-    endpoint_2_device_subslot = (
-        _text(record.get("ENDPOINT_2_DEVICE_SUBSLOT")) or endpoint_2_connection_point_nr
-    )
-    endpoint_2_ccp_connection_point_nr = (
-        _text(record.get("ENDPOINT_2_CCP_CONNECTION_POINT_NR")) or endpoint_2_connection_point_nr
-    )
-    endpoint_2_ccp_slot = _text(record.get("ENDPOINT_2_CCP_SLOT")) or endpoint_2_slot
-    endpoint_2_ccp_subslot = _text(record.get("ENDPOINT_2_CCP_SUBSLOT")) or endpoint_2_subslot
+    endpoint_2_device_slot = _text(record.get("ENDPOINT_2_DEVICE_SLOT"))
+    endpoint_2_device_subslot = _text(record.get("ENDPOINT_2_DEVICE_SUBSLOT"))
+    endpoint_2_ccp_connection_point_nr = _text(record.get("ENDPOINT_2_CCP_CONNECTION_POINT_NR"))
+    endpoint_2_ccp_slot = _text(record.get("ENDPOINT_2_CCP_SLOT"))
+    endpoint_2_ccp_subslot = _text(record.get("ENDPOINT_2_CCP_SUBSLOT"))
     required_port_fields = (
         endpoint_1_ne,
         endpoint_1_ne_part,

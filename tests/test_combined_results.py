@@ -8,6 +8,7 @@ from lasagna.route_sorting.combined_results import (
     _sort_rows_by_structured_contract,
     _sort_service_sections_by_structured_contract,
 )
+from lasagna.route_sorting.combined_results_models import TRUSTED_TRANSPORT_PORT_MATCH_RULES
 from lasagna.route_sorting.route_rows import InCARow
 
 
@@ -102,7 +103,7 @@ def _transport_adjacency(
     endpoint_2_device_slot: str = "",
     endpoint_2_device_subslot: str = "",
     endpoint_2_ccp_connection_point_nr: str = "",
-    port_match_rule: str = "DEVICE_SUBSLOT_EQUALS_CCP_CONNECTION_POINT_NR",
+    port_match_rule: str = "CABLING_POINT_TO_PEER_CABLING_POINT",
     platform_family: str = "",
     edge_position_path: str = "",
 ) -> dict[str, object]:
@@ -423,7 +424,7 @@ def test_structured_contract_preserves_bearer_a_to_b_transport_direction() -> No
     assert [row.site_code for row in result] == ["ZZZ", "MID", "AAA"]
 
 
-def test_structured_contract_orders_ic_388612_palo_handoff_from_transport_adjacency() -> None:
+def test_structured_contract_fails_ic_388612_palo_handoff_with_unapproved_rules() -> None:
     service_id = "IC-388612"
     bearer = "ASH/R1 X 21-SCR/CS X 28 100G01"
     sanf_palo = "PALO-SANF ODU411"
@@ -516,15 +517,16 @@ def test_structured_contract_orders_ic_388612_palo_handoff_from_transport_adjace
         _row("SANF", sanf_palo, 1, ne_info="SANF XS G40 02", status_t_time="Planned"),
     ]
 
-    result = _sort_rows_by_structured_contract(
-        rows,
-        metadata,
-        service_id,
-        transport_adjacency,
-    )
-
-    palo_order = [row.ne_info for row in result if row.site_code == "PALO"]
-    assert palo_order == ["PALO XS G40 04", "PALO XS TM 03 TM-3000I-01"]
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="untrusted TRANSPORT_DEVICE_ADJACENCY port match rule",
+    ):
+        _sort_rows_by_structured_contract(
+            rows,
+            metadata,
+            service_id,
+            transport_adjacency,
+        )
 
 
 def test_structured_contract_orders_ic_388612_chc_den_slc_from_endpoint_ports() -> None:
@@ -664,7 +666,7 @@ def test_structured_contract_fails_tm_client_line_without_explicit_mapping() -> 
                     endpoint_2_slot="SLED7",
                     endpoint_2_device_slot="SLED7",
                     endpoint_2_device_subslot="T15",
-                    port_match_rule="T_PORT_TO_CONNECTION_POINT_NR",
+                    port_match_rule="CABLING_POINT_TO_PEER_CABLING_POINT",
                     platform_family="G30_G40",
                 ),
             ],
@@ -1204,7 +1206,13 @@ def test_structured_contract_rejects_blank_transport_adjacency_source() -> None:
 
 @pytest.mark.parametrize(
     "port_match_rule",
-    ("", "UNKNOWN_PORT_MATCH_RULE"),
+    (
+        "",
+        "UNKNOWN_PORT_MATCH_RULE",
+        "DEVICE_SUBSLOT_EQUALS_CCP_CONNECTION_POINT_NR",
+        "T_PORT_TO_CONNECTION_POINT_NR",
+        "CONTENT_POSITION_TO_LINE_ENDPOINT",
+    ),
 )
 def test_structured_contract_rejects_unknown_or_blank_port_match_rule(
     port_match_rule: str,
@@ -1233,6 +1241,37 @@ def test_structured_contract_rejects_unknown_or_blank_port_match_rule(
                     platform_family="G30_G40",
                 ),
             ],
+        )
+
+
+def test_trusted_transport_port_match_rules_only_allow_cabling_relation() -> None:
+    assert TRUSTED_TRANSPORT_PORT_MATCH_RULES == frozenset({"CABLING_POINT_TO_PEER_CABLING_POINT"})
+
+
+def test_structured_contract_rejects_cabling_rule_with_missing_endpoint_fields() -> None:
+    service_id = "IC-123456"
+    bearer = "AAA-BBB 100G01"
+    adjacency = _transport_adjacency(
+        service_id,
+        bearer,
+        "AAA",
+        "BBB",
+        port_match_rule="CABLING_POINT_TO_PEER_CABLING_POINT",
+    )
+    adjacency["ENDPOINT_1_DEVICE_SUBSLOT"] = ""
+
+    with pytest.raises(
+        StructuredRouteContractError,
+        match="endpoint port proof missing in TRANSPORT_DEVICE_ADJACENCY",
+    ):
+        _sort_rows_by_structured_contract(
+            [
+                _row("AAA", bearer, 1, ne_info="AAA XS DTN 01"),
+                _row("BBB", bearer, 1, ne_info="BBB XS DTN 02"),
+            ],
+            [_metadata_between(service_id, bearer, 1, "AAA", "BBB")],
+            service_id,
+            [adjacency],
         )
 
 
