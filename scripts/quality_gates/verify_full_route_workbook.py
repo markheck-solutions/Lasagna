@@ -12,6 +12,8 @@ from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
+from lasagna.workbook.writer import FAILED_SOURCE_ROWS_TITLE
+
 ROUTE_HEADERS = (
     "Location ID",
     "Site Code",
@@ -106,7 +108,7 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
                 row_number += 1
                 continue
             title = sheet.cell(row=row_number - 1, column=1).value if row_number > 1 else None
-            target_rows = [] if title == "Source Route Rows (Not Route Proof)" else rows
+            target_rows = [] if title == FAILED_SOURCE_ROWS_TITLE else rows
             row_number = _append_route_section_rows(sheet, row_number + 1, target_rows, service_id)
         return rows
     finally:
