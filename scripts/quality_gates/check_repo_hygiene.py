@@ -92,7 +92,9 @@ def main() -> int:
 
     secrets = _find_secret_hits(files)
     if secrets:
-        failures.append("Secret-like patterns found:\n" + "\n".join(secrets))
+        failures.append(
+            f"Secret-like patterns found in {len(secrets)} file(s); details suppressed."
+        )
 
     if failures:
         print("Repo hygiene: FAIL")
