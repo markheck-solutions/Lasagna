@@ -158,6 +158,16 @@ def test_dwdm_adjacency_requires_cabling_backed_relation_not_platform_gate() -> 
     assert "peer_cacp.CABPT_INT_ID IS NOT NULL" in template
     assert "peer_cacp.CABPT_INT_ID != endpoint_cacp.CABPT_INT_ID" in template
     assert "CABLING_POINT_TO_PEER_CABLING_POINT" in template
+    assert "endpoint_cacp.CABPT_INT_ID AS endpoint_cabpt_int_id" in template
+    assert "peer_cacp.CABPT_INT_ID AS peer_cabpt_int_id" in template
+    assert (
+        "TO_VARCHAR(second_endpoint.endpoint_cabpt_int_id)\n"
+        "        = TO_VARCHAR(first_endpoint.peer_cabpt_int_id)" in template
+    )
+    assert (
+        "TO_VARCHAR(first_endpoint.endpoint_cabpt_int_id)\n"
+        "        = TO_VARCHAR(second_endpoint.peer_cabpt_int_id)" in template
+    )
     assert "device_row_keys.device_platform_family =" not in cabling_block
     assert "UPPER(COALESCE(ne_type" not in cabling_block
     assert "LIKE" not in cabling_block

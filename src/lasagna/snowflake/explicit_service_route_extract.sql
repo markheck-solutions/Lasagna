@@ -900,6 +900,8 @@ device_row_keys AS (
 dwdm_cabling_endpoint_candidates AS (
     SELECT DISTINCT
         endpoint_sites.*,
+        endpoint_cacp.CABPT_INT_ID AS endpoint_cabpt_int_id,
+        peer_cacp.CABPT_INT_ID AS peer_cabpt_int_id,
         device_row_keys.ne_type AS device_ne_type,
         device_row_keys.ne_function AS device_ne_function,
         device_row_keys.device_route_path,
@@ -974,7 +976,9 @@ candidate_site_counts AS (
             OR device_slot IS NULL
             OR device_subslot IS NULL
             OR slot IS NULL
-            OR connection_point_nr IS NULL,
+            OR connection_point_nr IS NULL
+            OR endpoint_cabpt_int_id IS NULL
+            OR peer_cabpt_int_id IS NULL,
             1,
             0
         )) AS null_endpoint_count
@@ -1073,6 +1077,10 @@ JOIN ranked_endpoints second_endpoint
     AND second_endpoint.port_match_rule = first_endpoint.port_match_rule
     AND second_endpoint.endpoint_proof_source = first_endpoint.endpoint_proof_source
     AND second_endpoint.endpoint_rank = 2
+    AND TO_VARCHAR(second_endpoint.endpoint_cabpt_int_id)
+        = TO_VARCHAR(first_endpoint.peer_cabpt_int_id)
+    AND TO_VARCHAR(first_endpoint.endpoint_cabpt_int_id)
+        = TO_VARCHAR(second_endpoint.peer_cabpt_int_id)
 WHERE first_endpoint.endpoint_rank = 1
 )
 SELECT
