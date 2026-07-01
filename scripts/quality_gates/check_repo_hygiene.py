@@ -22,6 +22,7 @@ SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*=\s*['\"][^'\"]{8,}['\"]"),
     re.compile(r"-----BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----"),
 )
+# Canary marker for structured evidence rerun proof.
 MAX_TRACKED_FILE_BYTES = 5 * 1024 * 1024
 
 
