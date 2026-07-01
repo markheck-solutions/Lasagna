@@ -116,10 +116,7 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
 
 
 def _append_route_section_rows(
-    sheet: Any,
-    row_number: int,
-    rows: list[dict[str, Any]],
-    service_id: str,
+    sheet: Any, row_number: int, rows: list[dict[str, Any]], service_id: str
 ) -> int:
     while row_number <= sheet.max_row:
         values = [sheet.cell(row=row_number, column=column).value for column in range(1, 19)]
