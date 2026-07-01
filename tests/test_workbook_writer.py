@@ -6,6 +6,7 @@ from openpyxl import load_workbook
 from lasagna.domain.route_models import ROUTE_COLUMNS, RouteRow, ServiceRouteResult
 from lasagna.domain.service_ids import parse_service_id_text
 from lasagna.workbook.writer import (
+    FAILED_SOURCE_ROWS_TITLE,
     NO_MIGRATION_MESSAGE,
     NO_ROUTE_ROWS_MESSAGE,
     SUMMARY_COLUMNS,
@@ -141,6 +142,34 @@ def test_writer_keeps_service_failures_isolated(tmp_path: Path) -> None:
         assert workbook["IC-666666"]["A7"].value == NO_ROUTE_ROWS_MESSAGE
         summary_statuses = [workbook["Summary"][f"D{row}"].value for row in range(2, 5)]
         assert summary_statuses == ["OK", "SORT FAILED", "NO DATA"]
+    finally:
+        workbook.close()
+
+
+def test_writer_labels_failed_visible_rows_as_source_rows_not_route_proof(
+    tmp_path: Path,
+) -> None:
+    parsed = parse_service_id_text("IC-888888")
+    service_results = {
+        "IC-888888": ServiceRouteResult.sort_failed(
+            "IC-888888",
+            "transport adjacency path not proven. Source rows shown for troubleshooting only; not route proof.",
+            (_route_row("ALPHA", "ALPHA-BETA OL01"),),
+            route_order_source="SOURCE_ROWS_NOT_ROUTE_PROOF",
+        )
+    }
+
+    [result] = write_route_workbooks(parsed, service_results, tmp_path)
+    workbook = load_workbook(result.path, data_only=True)
+    try:
+        service_sheet = workbook["IC-888888"]
+        summary = workbook["Summary"]
+        assert service_sheet["B2"].value == "SORT FAILED"
+        assert service_sheet["A5"].value == FAILED_SOURCE_ROWS_TITLE
+        assert service_sheet["A7"].value == "LOC-ALPHA"
+        assert summary["D2"].value == "SORT FAILED"
+        assert summary["E2"].value == 1
+        assert summary["I2"].value == "SOURCE_ROWS_NOT_ROUTE_PROOF"
     finally:
         workbook.close()
 

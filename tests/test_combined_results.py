@@ -1,12 +1,16 @@
+import csv
+import json
 from pathlib import Path
 
 import pytest
 
 from lasagna.route_sorting.combined_results import (
+    FAILED_SOURCE_ROWS_NOT_PROOF,
     StructuredRouteContractError,
     _bearer_message,
     _sort_rows_by_structured_contract,
     _sort_service_sections_by_structured_contract,
+    sort_combined_csv_to_service_results,
 )
 from lasagna.route_sorting.combined_results_models import TRUSTED_TRANSPORT_PORT_MATCH_RULES
 from lasagna.route_sorting.route_rows import InCARow
@@ -185,6 +189,41 @@ def _dp_endpoint_role(
     }
 
 
+def _write_combined_csv(path: Path, rows: list[tuple[str, dict[str, object]]]) -> Path:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["QID", "ROW_DATA"])
+        for qid, record in rows:
+            writer.writerow([qid, json.dumps(record)])
+    return path
+
+
+def _device_record(
+    service_id: str,
+    *,
+    site_code: str,
+    ne: str,
+    ne_part: str,
+    route_path: str,
+    pos: int,
+) -> dict[str, object]:
+    return {
+        "SERVICE_ID": service_id,
+        "SITE_CODE": site_code,
+        "SITE_TYPE": "XS",
+        "NE": ne,
+        "NE_PART": ne_part,
+        "OPTIC_FUNCTION": "TM",
+        "DEVICE_LOCATION": f"[{site_code}]01/R01/RU01/.::{pos}:A",
+        "CONNECTION_POINT_NR": str(pos),
+        "DIRECTION": "A",
+        "ROUTE_PATH": route_path,
+        "POS": pos,
+        "SLOT": f"{pos:02d}",
+        "SUBSLOT": f"{pos:02d}",
+    }
+
+
 def test_bearer_message_keeps_only_bearer_name() -> None:
     assert (
         _bearer_message(
@@ -201,6 +240,78 @@ def test_bearer_message_keeps_only_bearer_name() -> None:
 
 def test_bearer_message_is_blank_when_no_bearer_line() -> None:
     assert _bearer_message(["Route order: ROUTE_ORDER_METADATA"]) == ""
+
+
+def test_sort_failed_keeps_route_metadata_ordered_source_rows_visible_without_proof(
+    tmp_path: Path,
+) -> None:
+    service_id = "IC-123456"
+    first_edge = "AAA-BBB OL01"
+    second_edge = "BBB-CCC OL02"
+    combined_csv_path = _write_combined_csv(
+        tmp_path / "combined.csv",
+        [
+            ("ROUTE_ORDER_METADATA", _metadata_between(service_id, second_edge, 2, "BBB", "CCC")),
+            ("ROUTE_ORDER_METADATA", _metadata_between(service_id, first_edge, 1, "AAA", "BBB")),
+            (
+                "DEVICE",
+                _device_record(
+                    service_id,
+                    site_code="CCC",
+                    ne="CCC XS TM 01",
+                    ne_part="TM-1",
+                    route_path=second_edge,
+                    pos=1,
+                ),
+            ),
+            (
+                "DEVICE",
+                _device_record(
+                    service_id,
+                    site_code="AAA",
+                    ne="AAA XS TM 01",
+                    ne_part="TM-1",
+                    route_path=first_edge,
+                    pos=1,
+                ),
+            ),
+            (
+                "DEVICE",
+                _device_record(
+                    service_id,
+                    site_code="BBB",
+                    ne="BBB XS TM 02",
+                    ne_part="TM-2",
+                    route_path=second_edge,
+                    pos=2,
+                ),
+            ),
+            (
+                "DEVICE",
+                _device_record(
+                    service_id,
+                    site_code="BBB",
+                    ne="BBB XS TM 01",
+                    ne_part="TM-1",
+                    route_path=first_edge,
+                    pos=2,
+                ),
+            ),
+        ],
+    )
+
+    result = sort_combined_csv_to_service_results(combined_csv_path, [service_id])[service_id]
+
+    assert result.status == "SORT FAILED"
+    assert result.route_order_source == FAILED_SOURCE_ROWS_NOT_PROOF
+    assert "transport adjacency path not proven" in result.message
+    assert "not route proof" in result.message
+    assert [(row.site_code, row.route_path, row.pos) for row in result.sorted_rows] == [
+        ("AAA", first_edge, "1"),
+        ("BBB", first_edge, "2"),
+        ("CCC", second_edge, "1"),
+        ("BBB", second_edge, "2"),
+    ]
 
 
 def test_structured_contract_sorts_by_edge_sequence_and_site_side() -> None:

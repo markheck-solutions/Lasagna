@@ -110,8 +110,22 @@ class ServiceRouteResult:
         return cls(service_id=service_id, status="NO DATA", message=message)
 
     @classmethod
-    def sort_failed(cls, service_id: str, message: str) -> ServiceRouteResult:
-        return cls(service_id=service_id, status="SORT FAILED", message=message)
+    def sort_failed(
+        cls,
+        service_id: str,
+        message: str,
+        sorted_rows: tuple[RouteRow, ...] = (),
+        migration_rows: tuple[RouteRow, ...] = (),
+        route_order_source: str = "",
+    ) -> ServiceRouteResult:
+        return cls(
+            service_id=service_id,
+            status="SORT FAILED",
+            sorted_rows=sorted_rows,
+            migration_rows=migration_rows,
+            route_order_source=route_order_source,
+            message=message,
+        )
 
     @classmethod
     def snowflake_error(cls, service_id: str, message: str) -> ServiceRouteResult:

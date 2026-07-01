@@ -12,6 +12,8 @@ from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
+from lasagna.workbook.writer import FAILED_SOURCE_ROWS_TITLE
+
 ROUTE_HEADERS = (
     "Location ID",
     "Site Code",
@@ -48,10 +50,8 @@ BASELINE_FIELDS = (
 
 
 def _text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text if text else None
+    text = "" if value is None else str(value)
+    return text or None
 
 
 def _hash_rows(rows: list[dict[str, Any]]) -> str:
@@ -107,17 +107,16 @@ def _service_route_rows(workbook_path: Path, service_id: str) -> list[dict[str, 
             if tuple(values) != ROUTE_HEADERS:
                 row_number += 1
                 continue
-            row_number = _append_route_section_rows(sheet, row_number + 1, rows, service_id)
+            title = sheet.cell(row=row_number - 1, column=1).value if row_number > 1 else None
+            target_rows = [] if title == FAILED_SOURCE_ROWS_TITLE else rows
+            row_number = _append_route_section_rows(sheet, row_number + 1, target_rows, service_id)
         return rows
     finally:
         workbook.close()
 
 
 def _append_route_section_rows(
-    sheet: Any,
-    row_number: int,
-    rows: list[dict[str, Any]],
-    service_id: str,
+    sheet: Any, row_number: int, rows: list[dict[str, Any]], service_id: str
 ) -> int:
     while row_number <= sheet.max_row:
         values = [sheet.cell(row=row_number, column=column).value for column in range(1, 19)]
